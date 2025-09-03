@@ -5,6 +5,12 @@
 <html>
 <head>
   <title>Resource Planning Board</title>
+  
+  <!-- Favicon -->
+  <link rel="icon" type="image/jpeg" href="/logo.jpg">
+  <link rel="shortcut icon" type="image/jpeg" href="/logo.jpg">
+  <link rel="apple-touch-icon" href="/logo.jpg">
+  
   <meta charset="UTF-8">
    <link rel="stylesheet" href="/stylesheets/styles.css">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -119,15 +125,15 @@
       <div class="d-flex align-items-center flex-wrap gap-3">
         <form method="get" action="/calendar-view" class="d-flex align-items-center gap-2" id="dateRangeForm">
           <div class="date-input-group">
-            <label for="startMonth" class="form-label">From</label>
+            <!-- <label for="startMonth" class="form-label">From</label> -->
             <input type="month" id="startMonth" name="startMonth" value="<%= _startYear %>-<%= _startMonth.toString().padStart(2, '0') %>" class="form-control">
           </div>
           <div class="date-input-group">
-            <label for="endMonth" class="form-label">To</label>
+            <!-- <label for="endMonth" class="form-label">To</label> -->
             <input type="month" id="endMonth" name="endMonth" value="<%= _endYear %>-<%= _endMonth.toString().padStart(2, '0') %>" class="form-control">
           </div>
-          <button type="submit" class="btn btn-primary" style="margin-top: 12px;">
-            <i class="fas fa-search"></i> 
+          <button type="submit" class="btn btn-primary" aria-label="Search">
+            <i class="fas fa-search"></i>
           </button>
           <!-- Move Apply button up -->
         </form>
@@ -138,13 +144,13 @@
             <i class="fas fa-chevron-down toggle-icon"></i>
           </button>
           <a href="/assigned-resources" class="btn btn-primary calendar-header-btn">
-            <i class="fas fa-file-excel"></i> TABLE VIEW
+            <i class="fas fa-file-excel"></i> Table View
           </a>
           <button id="toggleDragFill" class="btn btn-primary calendar-header-btn">
             <i class="fas fa-fill"></i> Enable Drag Fill
           </button>
           <a href="/schedule" class="btn btn-primary calendar-header-btn">
-            <i class="fas fa-calendar-plus"></i> Schedule
+            <i class="fas fa-calendar-plus"></i> Allocate
           </a>
         </div>
       </div>
@@ -2200,6 +2206,46 @@ $(document).ready(function() {
   // Initialize sticky calendar scroll synchronization
   initializeStickyCalendarScrolling();
   
+  // Date range validation for calendar view
+  function validateDateRange() {
+    const startMonth = $('#startMonth').val();
+    const endMonth = $('#endMonth').val();
+
+    if (startMonth && endMonth) {
+      const start = new Date(startMonth + '-01');
+      const end = new Date(endMonth + '-01');
+
+      if (end <= start) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  // Real-time validation on date input changes
+  $('#startMonth').on('change', function() {
+    if (!validateDateRange()) {
+      alert('End month must be after start month');
+      $(this).focus();
+    }
+  });
+
+  $('#endMonth').on('change', function() {
+    if (!validateDateRange()) {
+      alert('End month must be after start month');
+      $(this).focus();
+    }
+  });
+
+  // Form submission validation
+  $('#dateRangeForm').on('submit', function(e) {
+    if (!validateDateRange()) {
+      e.preventDefault();
+      alert('End month must be after start month');
+      return false;
+    }
+  });
+  
   // Cell click handler for assignment
   $(document).on('click', '.clickable-cell', function(e) {
     if (isDragModeEnabled || isDragFillEnabled) return;
@@ -2790,7 +2836,7 @@ function loadProjects() {
     
     data.forEach(function(project) {
       // Compose a detailed briefing for each project using ProjectMaster schema fields
-      const briefing = `${project.projectName} | Manager: ${project.projectManager || ''} | CBSL: ${project.cbslClient || ''} | DIH: ${project.dihClient || ''}`;
+      const briefing = `${project.projectName} `;
       projectSelect.append(`<option value="${project._id}">${briefing}</option>`);
     });
   }).fail(function() {

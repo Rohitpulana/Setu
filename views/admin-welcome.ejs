@@ -1,15 +1,261 @@
 <!-- views/admin-welcome.ejs -->
 
+<div class="min-h-screen bg-gray-50">
+  <!-- Top navbar -->
+  <header>
+    <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+      <div class="flex justify-between h-16 items-center">
+        <div class="flex items-center gap-3">
+          <img src="/logo.jpg" alt="logo" class="h-10 w-10 rounded-full object-cover" />
 
-<h1>Welcome, Admin!</h1>
+          <h1 class="text-xl font-semibold mt-6">System for Efficient Team Utilization</h1>
+          
+        </div>
+        <div class="flex items-center gap-4 mt-3">
+          <!-- <button title="Notifications" class="p-2 rounded-md hover:bg-gray-100">
+            🔔
+          </button>
+          <button title="Settings" class="p-2 rounded-md hover:bg-gray-100">
+            ⚙️
+          </button> -->
+          <div class="flex items-center gap-2 p-2">
+            <span class="text-sm text-gray-600"><%= (session && session.user && session.user.email) ? session.user.email : (users && users[0] && users[0].email) || 'admin@cbsl.com' %></span>
+            <!-- <img src="/uploads/bcd2f65d70ff4e312a7fdd046b59bf3f" alt="profile" class="h-8 w-8 rounded-full object-cover" /> -->
+          </div>
+        </div>
+      </div>
+    </div>
+  </header>
 
-<!-- <p>You're successfully logged in.</p> -->
+  <main class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6">
+    <!-- KPI Cards -->
+    <div class="grid grid-cols-1 md:grid-cols-4 gap-4">
+      <div class="bg-white p-4 rounded-lg shadow-sm">
+        <div class="text-sm text-gray-500">Total Employees</div>
+        <div class="mt-2 text-2xl font-bold"><%= typeof totalEmployees !== 'undefined' ? totalEmployees : 0 %></div>
+      </div>
+      <div class="bg-white p-4 rounded-lg shadow-sm">
+        <div class="text-sm text-gray-500">Total Projects</div>
+        <div class="mt-2 text-2xl font-bold"><%= typeof totalProjects !== 'undefined' ? totalProjects : 0 %></div>
+      </div>
+      <div class="bg-white p-4 rounded-lg shadow-sm">
+        <div class="text-sm text-gray-500">Total Practices</div>
+        <div class="mt-2 text-2xl font-bold"><%= typeof totalPractices !== 'undefined' ? totalPractices : 0 %></div>
+      </div>
+      <div class="bg-white p-4 rounded-lg shadow-sm">
+        <div class="text-sm text-gray-500">Hours Assigned (This Month)</div>
+        <div class="mt-2 text-2xl font-bold"><%= typeof hoursAssignedThisMonth !== 'undefined' ? hoursAssignedThisMonth : 0 %></div>
+      </div>
+    </div>
+
+    <!-- Quick Actions area (full width) -->
+    <div class="grid grid-cols-1 lg:grid-cols-3 gap-4 mt-6">
+      <section class="bg-white p-4 rounded-lg shadow-sm lg:col-span-3">
+        <h2 class="font-semibold mb-3">Quick Actions</h2>
+        <div class="grid grid-cols-2 md:grid-cols-4 gap-2">
+          <% if (quickActions && quickActions.length) { %>
+            <% quickActions.forEach(action => { %>
+              <a href="<%= action.url %>" class="bg-indigo-50 hover:bg-indigo-100 text-indigo-700 p-3 rounded-md flex items-center justify-center"> <%= action.title %> </a>
+            <% }) %>
+          <% } %>
+        </div>
+      </section>
+    </div>
+
+  <!-- Lower area: Charts (month picker moved into Utilization Overview) -->
+
+    <div class="grid grid-cols-1 lg:grid-cols-2 gap-4 mt-6">
+      <!-- Left card: Employee Utilization + Division Utilization side-by-side -->
+      <section class="bg-white p-4 rounded-lg shadow-sm">
+        <div class="flex items-start justify-between">
+          <div>
+            <h2 class="font-semibold">Utilization Overview</h2>
+            
+          </div>
+          <div class="flex items-center gap-3">
+            <input id="monthPicker" type="month" class="border rounded-md px-3 py-2 text-sm" />
+          </div>
+        </div>
+
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mt-4">
+          <div class="bg-white rounded-md p-3 shadow-sm">
+            <h3 class="text-sm font-medium mb-2">Employee Utilization</h3>
+            <div class="w-full h-56">
+              <canvas id="employeeUtilChart" data-counts='<%= JSON.stringify(employeeUtilCounts || [0,0,0]) %>' style="width:100%;height:100%;"></canvas>
+            </div>
+            
+          </div>
+
+          <div class="bg-white rounded-md p-3 shadow-sm">
+            <h3 class="text-sm font-medium mb-2">Division Utilization (by Project)</h3>
+            <div class="w-full h-56">
+              <canvas id="divisionChart" data-labels='<%= JSON.stringify(divisionLabels || []) %>' data-values='<%= JSON.stringify(divisionData || []) %>' style="width:100%;height:100%;"></canvas>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Right card: Practice-wise distribution -->
+      <section class="bg-white p-4 rounded-lg shadow-sm">
+        <div class="flex items-start justify-between">
+          <div>
+            <h2 class="font-semibold">Practice-wise Resource Distribution</h2>
+            
+          </div>
+        </div>
+          <div class="mt-4 bg-white rounded-md p-3 shadow-sm">
+          <div class="w-full h-72 mx-auto">
+            <canvas id="practiceChart" data-labels='<%= JSON.stringify(practiceLabels || []) %>' data-values='<%= JSON.stringify(practiceData || []) %>' style="width:100%;height:100%;"></canvas>
+          </div>
+        </div>
+      </section>
+    </div>
+
+  <!-- Top Contributors / Highlights removed -->
+  </main>
+</div>
 
 
-<!-- <div style="margin-top: 20px;">
-  <a href="/dashboard/admin/view-employees">👥 View Employees</a><br><br>
-  <a href="/upload-employees">📤 Upload Employees</a><br><br>
-  <a href="/upload-project-master">📁 Upload Project Master</a><br><br>
-  <a href="/view-project-master">📊 View Project Master</a><br><br>
-  <a href="/assigned-resources">📌 View Assigned Resources</a>
-</div> -->
+
+  <script>
+  (function(){
+    // Helper: read JSON dataset safely
+    function readDataset(el, key, fallback) {
+      try { return JSON.parse(el.dataset[key] || fallback); } catch(e) { return fallback; }
+    }
+
+    // Color palette
+    const PALETTE = ['#6366F1','#06B6D4','#8B5CF6','#10B981','#F59E0B','#F97316','#EF4444','#3B82F6','#E11D48','#84CC16'];
+
+    // Center text plugin: shows hovered segment percent or total
+    const centerTextPlugin = {
+      id: 'centerText',
+      afterDraw(chart) {
+        const {ctx, chartArea: {left, right, top, bottom}, data, _active} = chart;
+        const centerX = (left + right) / 2;
+        const centerY = (top + bottom) / 2;
+        ctx.save();
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillStyle = '#374151';
+
+        // Helper: determine if a data index is currently visible (works with Chart.js v3+)
+        function isIndexVisible(ch, idx) {
+          try {
+            if (typeof ch.getDataVisibility === 'function') return ch.getDataVisibility(idx);
+          } catch(e){}
+          // Fallback: check element.hidden on meta data
+          try {
+            const meta = ch.getDatasetMeta && ch.getDatasetMeta(0);
+            const el = meta && meta.data && meta.data[idx];
+            return el ? !el.hidden : true;
+          } catch(e) { return true; }
+        }
+
+        // If a segment is active (hovered), show its label and percent (percent relative to visible segments)
+        if (_active && _active.length) {
+          const active = _active[0];
+          const ds = data.datasets[active.datasetIndex];
+          const value = Number(ds.data[active.index]) || 0;
+          const total = ds.data.reduce((s, v, i) => s + (isIndexVisible(chart, i) ? (Number(v) || 0) : 0), 0) || 1;
+          const pct = Math.round((value / total) * 100);
+          ctx.font = '600 16px "Inter", system-ui, -apple-system, "Segoe UI"';
+          ctx.fillText(pct + '%', centerX, centerY - 8);
+          ctx.font = '400 12px "Inter"';
+          ctx.fillText(data.labels[active.index] || '', centerX, centerY + 12);
+        } else {
+          // Default: show total sum of currently visible segments only
+          const ds = data.datasets && data.datasets[0];
+          const total = ds ? ds.data.reduce((s, v, i) => s + (isIndexVisible(chart, i) ? (Number(v) || 0) : 0), 0) : 0;
+          ctx.font = '600 14px "Inter"';
+          ctx.fillText(total, centerX, centerY - 6);
+          ctx.font = '400 11px "Inter"';
+          ctx.fillText('Total', centerX, centerY + 12);
+        }
+        ctx.restore();
+      }
+    };
+
+    // Common chart options
+    function baseOptions() {
+      return {
+        responsive: true,
+        maintainAspectRatio: false,
+        cutout: '60%',
+        animation: { duration: 600, easing: 'easeOutCubic' },
+        plugins: {
+          legend: { position: 'bottom', labels: {boxWidth:12, padding:12, usePointStyle: true} },
+          tooltip: { enabled: true, padding: 8, titleFont: {weight:600} }
+        }
+      };
+    }
+
+    // Create a doughnut chart given canvas and data
+    function createDoughnut(el, labels, values, paletteOverride) {
+      const ctx = el.getContext('2d');
+      const palette = paletteOverride || PALETTE;
+      const bg = labels.map((_,i)=> palette[i % palette.length]);
+      return new Chart(ctx, {
+        type: 'doughnut',
+        data: { labels: labels, datasets: [{ data: values, backgroundColor: bg, hoverOffset: 8 }] },
+        options: baseOptions(),
+        plugins: [centerTextPlugin]
+      });
+    }
+
+    // Initialize Employee Utilization
+    (function(){
+      const el = document.getElementById('employeeUtilChart');
+      if (!el) return;
+      const counts = readDataset(el, 'counts', '[0,0,0]');
+      const labels = ['Fully Utilized','Partially Utilized','Unutilized'];
+      try { window.employeeChart = createDoughnut(el, labels, counts, ['#10B981','#F59E0B','#EF4444']); }
+      catch(e){ console.warn('employee chart error', e); }
+    })();
+
+    // Initialize Division Utilization
+    (function(){
+      const el = document.getElementById('divisionChart');
+      if (!el) return;
+      const labels = readDataset(el, 'labels', '[]');
+      const values = readDataset(el, 'values', '[]');
+      try { window.divisionChart = createDoughnut(el, labels, values); }
+      catch(e){ console.warn('division chart error', e); }
+    })();
+
+    // Initialize Practice Chart
+    (function(){
+      const el = document.getElementById('practiceChart');
+      if (!el) return;
+      const labels = readDataset(el, 'labels', '[]');
+      const values = readDataset(el, 'values', '[]');
+      try { window.practiceChart = createDoughnut(el, labels, values); }
+      catch(e){ console.warn('practice chart error', e); }
+    })();
+
+    // Month picker wiring: default to current month or URL param, reload with ?month=YYYY-MM
+    (function(){
+      const inp = document.getElementById('monthPicker');
+      if (!inp) return;
+      // parse ?month=YYYY-MM from URL
+      const params = new URLSearchParams(window.location.search);
+      const urlMonth = params.get('month');
+      const now = new Date();
+      const pad = n => n < 10 ? '0'+n : ''+n;
+      const defaultMonth = now.getFullYear() + '-' + pad(now.getMonth()+1);
+      inp.value = urlMonth || defaultMonth;
+
+      inp.addEventListener('change', function(){
+        const m = inp.value;
+        if (!m) return;
+        params.set('month', m);
+        // preserve other params
+        const target = window.location.pathname + '?' + params.toString();
+        window.location.href = target;
+      });
+    })();
+
+    // Register plugin globally
+    if (Chart && Chart.register) Chart.register(centerTextPlugin);
+  })();
+  </script>

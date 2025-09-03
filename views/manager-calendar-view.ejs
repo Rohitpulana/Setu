@@ -5,6 +5,12 @@
 <html>
 <head>
   <title>Manager Resource Planning Board</title>
+  
+  <!-- Favicon -->
+  <link rel="icon" type="image/jpeg" href="/logo.jpg">
+  <link rel="shortcut icon" type="image/jpeg" href="/logo.jpg">
+  <link rel="apple-touch-icon" href="/logo.jpg">
+  
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
@@ -116,14 +122,14 @@
         
         <form method="get" action="/dashboard/manager/calendar-view" class="d-flex align-items-center gap-2" id="dateRangeForm">
           <div class="date-input-group">
-            <label for="startMonth" class="form-label">From</label>
+            <!-- <label for="startMonth" class="form-label">From</label> -->
             <input type="month" id="startMonth" name="startMonth" value="<%= _startYear %>-<%= _startMonth.toString().padStart(2, '0') %>" class="form-control">
           </div>
           <div class="date-input-group">
-            <label for="endMonth" class="form-label">To</label>
+            <!-- <label for="endMonth" class="form-label">To</label> -->
             <input type="month" id="endMonth" name="endMonth" value="<%= _endYear %>-<%= _endMonth.toString().padStart(2, '0') %>" class="form-control">
           </div>
-          <button type="submit" class="btn btn-primary">
+          <button type="submit" class="btn btn-primary" aria-label="Search">
             <i class="fas fa-search"></i>
           </button>
         </form>
@@ -133,14 +139,14 @@
             <i class="fas fa-filter"></i>Filtering & Searching
             <i class="fas fa-chevron-down toggle-icon"></i>
           </button>
-          <a href="/dashboard/manager/assigned-resources" class="btn btn-secondary">
-            <i class="fas fa-file-excel">  Table View</i>
+          <a href="/dashboard/manager/assigned-resources" class="btn btn-outline-secondary filter-toggle-like">
+            <i class="fas fa-file-excel"></i> Table View
           </a>
-          <button id="toggleDragFill" class="btn btn-success">
+          <button id="toggleDragFill" class="btn btn-outline-secondary filter-toggle-like">
             <i class="fas fa-fill"></i> Enable Drag Fill
           </button>
-            <a href="/dashboard/manager/schedule" class="btn btn-primary">
-              <i class="fas fa-calendar-plus"></i> Schedule
+            <a href="/dashboard/manager/schedule" class="btn btn-outline-secondary filter-toggle-like">
+              <i class="fas fa-calendar-plus"></i> Allocate
             </a>
         </div>
       </div>
@@ -535,6 +541,23 @@
 }
 
 #advancedFilterToggle:hover {
+  background-color: #f3f4f6;
+  border-color: #9ca3af;
+}
+
+/* Reusable class to make other header actions (like Table View) match the Filtering & Searching button */
+.filter-toggle-like {
+  border-radius: 8px;
+  padding: 8px 16px;
+  font-weight: 500;
+  transition: all 0.2s ease;
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.filter-toggle-like:hover {
   background-color: #f3f4f6;
   border-color: #9ca3af;
 }
@@ -2399,6 +2422,46 @@ $(document).ready(function() {
   // Initialize sticky calendar scroll synchronization
   initializeStickyCalendarScrolling();
   
+  // Date range validation for manager calendar view
+  function validateDateRange() {
+    const startMonth = $('#startMonth').val();
+    const endMonth = $('#endMonth').val();
+
+    if (startMonth && endMonth) {
+      const start = new Date(startMonth + '-01');
+      const end = new Date(endMonth + '-01');
+
+      if (end <= start) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  // Real-time validation on date input changes
+  $('#startMonth').on('change', function() {
+    if (!validateDateRange()) {
+      alert('End month must be after start month');
+      $(this).focus();
+    }
+  });
+
+  $('#endMonth').on('change', function() {
+    if (!validateDateRange()) {
+      alert('End month must be after start month');
+      $(this).focus();
+    }
+  });
+
+  // Form submission validation
+  $('#dateRangeForm').on('submit', function(e) {
+    if (!validateDateRange()) {
+      e.preventDefault();
+      alert('End month must be after start month');
+      return false;
+    }
+  });
+  
   // Cell click handler for assignment
   $(document).on('click', '.clickable-cell', function(e) {
     if (isDragModeEnabled || isDragFillEnabled) return;
@@ -2429,10 +2492,10 @@ $(document).ready(function() {
   // Toggle drag mode
   $('#toggleDragMode').click(function() {
     isDragModeEnabled = !isDragModeEnabled;
-    if (isDragModeEnabled) {
-      isDragFillEnabled = false;
-      $('#toggleDragFill').html('<i class="fas fa-fill"></i> Enable Drag Fill').removeClass('btn-warning').addClass('btn-success');
-      $('body').removeClass('drag-fill-mode');
+  if (isDragModeEnabled) {
+  isDragFillEnabled = false;
+  $('#toggleDragFill').html('<i class="fas fa-fill"></i> Enable Drag Fill').removeClass('btn-warning').addClass('btn-outline-secondary');
+  $('body').removeClass('drag-fill-mode');
       
       $(this).html('<i class="fas fa-lock"></i> Disable Drag Mode').removeClass('btn-info').addClass('btn-warning');
       $('.draggable-block').attr('draggable', 'true').css('cursor', 'grab');
@@ -2447,16 +2510,16 @@ $(document).ready(function() {
   // Toggle drag fill mode
   $('#toggleDragFill').click(function() {
     isDragFillEnabled = !isDragFillEnabled;
-    if (isDragFillEnabled) {
+  if (isDragFillEnabled) {
       isDragModeEnabled = false;
       $('#toggleDragMode').html('<i class="fas fa-arrows-alt"></i> Enable Drag Mode').removeClass('btn-warning').addClass('btn-info');
       $('.draggable-block').attr('draggable', 'false').css('cursor', 'default');
       
-      $(this).html('<i class="fas fa-stop-circle"></i> Disable Drag Fill').removeClass('btn-success').addClass('btn-warning');
+  $(this).html('<i class="fas fa-stop-circle"></i> Disable Drag Fill').removeClass('btn-outline-secondary').addClass('btn-warning');
       $('body').addClass('drag-fill-mode');
       showToast('Drag-fill mode enabled! Click and drag to fill multiple cells with hours.', 'success');
     } else {
-      $(this).html('<i class="fas fa-fill"></i> Enable Drag Fill').removeClass('btn-warning').addClass('btn-success');
+  $(this).html('<i class="fas fa-fill"></i> Enable Drag Fill').removeClass('btn-warning').addClass('btn-outline-secondary');
       $('body').removeClass('drag-fill-mode');
       clearDragFillSelection();
       showToast('Drag-fill mode disabled.', 'info');
@@ -2990,7 +3053,7 @@ function loadProjects() {
     
   data.forEach(function(project) {
       // Compose a detailed briefing for each project using ProjectMaster schema fields
-      const briefing = `${project.projectName} | Manager: ${project.projectManager || ''} | CBSL: ${project.cbslClient || ''} | DIH: ${project.dihClient || ''}`;
+     const briefing = `${project.projectName}`;
       projectSelect.append(`<option value="${project._id}">${briefing}</option>`);
     });
   }).fail(function() {

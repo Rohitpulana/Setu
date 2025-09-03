@@ -22,6 +22,9 @@ const AssignedSchedule = require('./models/AssignedSchedule');
 const AuditLog = require('./models/AuditLog');
 const User = require('./models/User');
 
+// Import cascade deletion helpers
+const { checkEmployeeDependencies, cascadeDeleteEmployees } = require('./utils/cascadeHelpers');
+
 // Audit logging utility functions
 function getUserRolePrefix(req) {
   const userRole = req.session.user?.role || 'manager';
@@ -57,13 +60,41 @@ function getRouteContext(req) {
 
 async function logAuditAction(req, action, assignmentId, before, after, description, changes = {}) {
   try {
+    // Skip audit logging for Employee, Project, and Practice Master CRUD operations only
+    const currentRoute = req.originalUrl || req.route?.path || '';
+    const skipRoutes = [
+      '/employees/', '/project-master/', '/practice-master/',
+      '/upload-employees', '/upload-project-master', '/upload-practice-master',
+      '/view-employees', '/view-project-master', '/view-practice-master'
+    ];
+    
+    // Check if this is a master data CRUD operation that should be skipped
+    // Only skip if it's a direct master data operation, NOT schedule/assignment operations
+    const shouldSkipLogging = skipRoutes.some(skipRoute => currentRoute.includes(skipRoute)) ||
+                             (changes && changes.operation && (
+                               changes.operation.includes('admin_create_employee') ||
+                               changes.operation.includes('admin_update_employee') ||
+                               changes.operation.includes('admin_delete_employee') ||
+                               changes.operation.includes('admin_create_project') ||
+                               changes.operation.includes('admin_update_project') ||
+                               changes.operation.includes('admin_delete_project') ||
+                               changes.operation.includes('admin_create_practice') ||
+                               changes.operation.includes('admin_update_practice') ||
+                               changes.operation.includes('admin_delete_practice')
+                             ));
+    
+    if (shouldSkipLogging) {
+      //console.log('⚠️ Skipping audit log for master data operation:', description || 'Unknown operation');
+      return;
+    }
+
     // Get user info - support both admin and manager users
     const userEmail = req.session.user?.email || 'Unknown';
     const userRole = req.session.user?.role || 'Unknown';
     const userName = req.session.user?.email?.split('@')[0] || 'Unknown';
     
     // Better route detection - differentiate between admin and manager contexts
-    let route = req.originalUrl || req.route?.path || 'Unknown';
+    let route = currentRoute;
     
     // Clean route by removing query parameters
     if (route.includes('?')) {
@@ -769,6 +800,86 @@ app.delete('/dashboard/manager/assigned-resources/:id', isAuth, isManager, async
   }
 });
 
+// Manager: Bulk delete assigned schedules
+app.post('/dashboard/manager/assigned-resources/bulk-delete', isAuth, isManager, async (req, res) => {
+  try {
+    const ids = req.body['ids[]'] || req.body.ids || req.body.scheduleIds;
+    
+    if (!ids) {
+      return res.status(400).json({ success: false, error: 'No schedule IDs provided' });
+    }
+    
+    // Ensure ids is always an array
+    const idsArray = Array.isArray(ids) ? ids : [ids];
+    
+    if (idsArray.length === 0) {
+      return res.status(400).json({ success: false, error: 'No schedule IDs provided' });
+    }
+    
+    // Get original schedules for audit logging before deletion
+    const originalSchedules = await AssignedSchedule.find({ _id: { $in: idsArray } }).populate('employee').populate('project');
+    
+    // Delete the schedules
+    const result = await AssignedSchedule.deleteMany({ _id: { $in: idsArray } });
+    
+    if (result.deletedCount > 0) {
+      // Create consolidated audit log for bulk deletion
+      const deletedSchedulesInfo = originalSchedules.map(s => ({
+        empCode: s.employee?.empCode || 'N/A',
+        empName: s.employee?.name || 'N/A',
+        projectName: s.project?.projectName || 'N/A',
+        assignmentId: s._id
+      }));
+      
+      const employeeNames = deletedSchedulesInfo.map(s => `${s.empCode} (${s.empName})`).join(', ');
+      const projectNames = [...new Set(deletedSchedulesInfo.map(s => s.projectName))].join(', ');
+      
+      const description = `${getUserRolePrefix(req)} bulk deleted ${result.deletedCount} assignments for employees: ${employeeNames} from projects: ${projectNames} via ${getRouteContext(req)}`;
+      
+      const changes = {
+        operation: 'manager_bulk_delete_assignments',
+        deletedCount: result.deletedCount,
+        deletedSchedules: deletedSchedulesInfo,
+        employeeCount: [...new Set(deletedSchedulesInfo.map(s => s.empCode))].length,
+        projectCount: [...new Set(deletedSchedulesInfo.map(s => s.projectName))].length
+      };
+      
+      // For bulk operations, use the first employee and project info for the main fields
+      const firstEmployee = originalSchedules[0]?.employee;
+      const firstProject = originalSchedules[0]?.project;
+      
+      // Create a custom audit log entry that populates the Employee and Project columns properly
+      const auditEntry = await AuditLog.create({
+        manager: req.session.user?.email || 'Unknown',
+        managerName: req.session.user?.email?.split('@')[0] || 'Unknown',
+        userRole: req.session.user?.role || 'manager',
+        action: 'delete',
+        assignmentId: originalSchedules[0]?._id,
+        employeeCode: result.deletedCount === 1 ? firstEmployee?.empCode : `${result.deletedCount} employees`,
+        employeeName: result.deletedCount === 1 ? firstEmployee?.name : employeeNames,
+        projectName: [...new Set(deletedSchedulesInfo.map(s => s.projectName))].length === 1 ? 
+                    deletedSchedulesInfo[0].projectName : 
+                    `${[...new Set(deletedSchedulesInfo.map(s => s.projectName))].length} projects`,
+        description: description,
+        changes: changes,
+        before: { bulk: true, schedules: originalSchedules.map(s => s.toObject()) },
+        after: null,
+        route: req.originalUrl || getRouteContext(req),
+        ipAddress: req.ip || req.connection.remoteAddress,
+        userAgent: req.get('User-Agent'),
+        timestamp: new Date()
+      });
+      
+      res.json({ success: true, message: `Successfully deleted ${result.deletedCount} schedule(s)` });
+    } else {
+      res.status(404).json({ success: false, error: 'No schedules found or already deleted' });
+    }
+  } catch (err) {
+    console.error('Error in manager bulk delete assigned-resources:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 app.get('/dashboard/manager/assigned-resources', isAuth, isManager, async (req, res) => {
   try {
     // Get filter params
@@ -1461,22 +1572,238 @@ app.post('/dashboard/manager/schedule', isAuth, isManager, async (req, res) => {
 
 app.get('/dashboard/admin', isAuth, isAdmin, csrfProtection, async (req, res) => {
   try {
-    // Fetch all users from database
-    const allUsers = await User.find({}, 'email role createdAt').sort({ createdAt: -1 });
-    
+    // Basic counts
+    const [totalEmployees, totalProjects, totalPractices, allSchedules, allProjects, allEmployees] = await Promise.all([
+      Employee.countDocuments(),
+      ProjectMaster.countDocuments(),
+      PracticeMaster.countDocuments(),
+      AssignedSchedule.find().populate('employee').populate('project').populate('practice'),
+      ProjectMaster.find(),
+      Employee.find({}, 'empCode name')
+    ]);
+
+    // Helper to parse different dailyHours key formats into Date objects
+    function parseDateKeyToDate(key) {
+      // ISO format yyyy-mm-dd
+      if (/^\d{4}-\d{2}-\d{2}$/.test(key)) return new Date(key);
+      // D-Mon-YYYY or DD-Month-YYYY (e.g., 1-Jul-2025 or 01-July-2025)
+      const m = key.match(/^(\d{1,2})-([A-Za-z]{3,9})-(\d{4})$/);
+      if (m) {
+        const day = Number(m[1]);
+        const monthName = m[2];
+        const year = Number(m[3]);
+        const month = new Date(Date.parse(monthName + ' 1, 2000')).getMonth();
+        return new Date(year, month, day);
+      }
+      // Fallback: try Date.parse
+      const parsed = Date.parse(key);
+      if (!isNaN(parsed)) return new Date(parsed);
+      return null;
+    }
+
+    // Hours assigned in the current month — use ?month=YYYY-MM when provided
+    const monthParam = req.query.month; // expected format: 'YYYY-MM'
+    let currentYear, currentMonth;
+    if (monthParam && /^\d{4}-\d{2}$/.test(monthParam)) {
+      const parts = monthParam.split('-');
+      currentYear = parseInt(parts[0], 10);
+      currentMonth = parseInt(parts[1], 10) - 1; // JS months are 0-indexed
+    } else {
+      const now = new Date();
+      currentMonth = now.getMonth();
+      currentYear = now.getFullYear();
+    }
+    let hoursAssignedThisMonth = 0;
+
+    // Aggregations for top contributors and practice utilization
+    const employeeHours = {}; // { empId: hours }
+    const practiceHours = {}; // { practiceId: hours }
+    const projectHours = {}; // { projectId: hours }
+
+    allSchedules.forEach(s => {
+      if (!s || !s.dailyHours) return;
+      const empId = s.employee?._id ? s.employee._id.toString() : String(s.employee || 'unknown');
+      const practiceId = s.practice?._id ? s.practice._id.toString() : (s.employee?.homePractice || 'unknown');
+      const projId = s.project?._id ? s.project._id.toString() : String(s.project || 'unknown');
+
+      Object.keys(s.dailyHours).forEach(k => {
+        const parsed = parseDateKeyToDate(k);
+        if (!parsed) return;
+        if (parsed.getFullYear() === currentYear && parsed.getMonth() === currentMonth) {
+          const h = Number(s.dailyHours[k]) || 0;
+          hoursAssignedThisMonth += h;
+          if (!employeeHours[empId]) employeeHours[empId] = 0;
+          employeeHours[empId] += h;
+          if (!practiceHours[practiceId]) practiceHours[practiceId] = 0;
+          practiceHours[practiceId] += h;
+          if (!projectHours[projId]) projectHours[projId] = 0;
+          projectHours[projId] += h;
+        }
+      });
+    });
+
+    // Top contributors (employees)
+    const topEmployees = Object.keys(employeeHours).map(empId => {
+      const emp = allEmployees.find(e => String(e._id) === String(empId));
+      return {
+        id: empId,
+        empCode: emp?.empCode || 'N/A',
+        name: emp?.name || (employeeHours[empId] ? 'Employee' : 'Unknown'),
+        hours: employeeHours[empId]
+      };
+    }).sort((a,b) => b.hours - a.hours).slice(0,5);
+
+    // Top practices
+    // Need practice names - find by id in PracticeMaster
+    const practiceDocs = await PracticeMaster.find();
+    const topPractices = Object.keys(practiceHours).map(pid => {
+      const p = practiceDocs.find(x => String(x._id) === String(pid));
+      return {
+        id: pid,
+        name: p?.practiceName || pid,
+        hours: practiceHours[pid]
+      };
+    }).sort((a,b) => b.hours - a.hours).slice(0,5);
+
+    // Projects: determine on-track vs delayed using endDate
+    const today = new Date();
+    let projectsOnTrack = 0, projectsDelayed = 0;
+    allProjects.forEach(p => {
+      if (p.endDate && new Date(p.endDate) < today) projectsDelayed++; else projectsOnTrack++;
+    });
+
+
+  // mini calendar removed: no weekly calendar computations
+
+    // Available hours this month = employees * working days in month * 8
+    function workingDaysInMonth(year, monthIndex) {
+      const first = new Date(year, monthIndex, 1);
+      const last = new Date(year, monthIndex + 1, 0);
+      let count = 0;
+      for (let d = new Date(first); d <= last; d.setDate(d.getDate() + 1)) {
+        const wd = d.getDay();
+        if (wd !== 0 && wd !== 6) count++;
+      }
+      return count;
+    }
+    const workdays = workingDaysInMonth(currentYear, currentMonth);
+    const availableHours = totalEmployees * workdays * 8;
+
+    // Quick actions links
+    const quickActions = [
+      { title: 'Allocate', url: '/schedule' },
+      { title: 'Allocations', url: '/calendar-view' },
+      { title: 'Reports', url: '/project-allocation-report' },
+      { title: 'Users', url: '/view-users' }
+    ];
+
+    // --- Division utilization: sum of assigned hours grouped by project division (from ProjectMaster.dihClient) ---
+    let divisionLabels = [];
+    let divisionData = [];
+    try {
+      const projectsForDiv = await ProjectMaster.find().lean();
+      const projDivisionMap = {};
+      projectsForDiv.forEach(p => {
+        const d = (p.dihClient && String(p.dihClient).trim()) || (p.cbslClient && String(p.cbslClient).trim()) || 'Unassigned';
+        projDivisionMap[String(p._id)] = d;
+      });
+
+      const allSchedulesForDiv = await AssignedSchedule.find().lean();
+      const divisionHoursMap = {};
+      for (const s of allSchedulesForDiv) {
+        const projId = s.project ? String(s.project) : null;
+        const division = projId && projDivisionMap[projId] ? projDivisionMap[projId] : 'Unassigned';
+        if (!divisionHoursMap[division]) divisionHoursMap[division] = 0;
+        if (s.dailyHours) {
+          // Only count hours that fall into the selected month/year
+          Object.entries(s.dailyHours).forEach(([k, v]) => {
+            try {
+              const parsed = parseDateKeyToDate(k);
+              if (!parsed) return;
+              if (parsed.getFullYear() === currentYear && parsed.getMonth() === currentMonth) {
+                divisionHoursMap[division] += Number(v) || 0;
+              }
+            } catch (e) { /* ignore malformed keys */ }
+          });
+        }
+      }
+      divisionLabels = Object.keys(divisionHoursMap);
+      divisionData = divisionLabels.map(l => divisionHoursMap[l]);
+    } catch (e) {
+      console.warn('Failed to compute division utilization:', e);
+    }
+
+      // --- Practice-wise distribution: number of employees in each practice (from Employee.homePractice) ---
+      let practiceLabels = [];
+      let practiceData = [];
+      try {
+        const agg = await Employee.aggregate([
+          { $group: { _id: { $ifNull: ['$homePractice', 'Unassigned'] }, count: { $sum: 1 } } },
+          { $sort: { count: -1 } }
+        ]);
+        practiceLabels = agg.map(a => a._id);
+        practiceData = agg.map(a => a.count);
+      } catch (e) {
+        console.warn('Failed to compute practice distribution:', e);
+      }
+
+      // --- Employee Utilization Buckets (Fully / Partially / Unutilized) ---
+      // Assumption: per-employee available hours for the month = workdays * 8
+      // Categorization: Fully = >=100%, Partially = 10% - 99%, Unutilized = <10%
+      let employeeUtilCounts = [0, 0, 0]; // [fully, partial, unutilized]
+      try {
+        const perEmployeeAvailable = (workdays * 8) || 0;
+        // Ensure we consider all employees (those with zero assigned hours count as unutilized)
+        allEmployees.forEach(emp => {
+          const empId = String(emp._id);
+          const hrs = Number(employeeHours[empId] || 0);
+          let pct = 0;
+          if (perEmployeeAvailable > 0) pct = (hrs / perEmployeeAvailable) * 100;
+          if (pct >= 100) {
+            employeeUtilCounts[0] += 1; // fully
+          } else if (pct >= 10) {
+            employeeUtilCounts[1] += 1; // partial
+          } else {
+            employeeUtilCounts[2] += 1; // unutilized
+          }
+        });
+      } catch (e) {
+        console.warn('Failed to compute employee utilization buckets:', e);
+        employeeUtilCounts = [0,0,0];
+      }
+
     res.render('admin-welcome', {
       csrfToken: req.csrfToken(),
       title: 'Welcome Admin',
       layout: 'sidebar-layout',
-      users: allUsers
+      users: [], // keep for compatibility
+      session: req.session,
+      totalEmployees,
+      totalProjects,
+      totalPractices,
+      hoursAssignedThisMonth,
+      availableHours,
+  topEmployees,
+  topPractices,
+  projectsOnTrack,
+  projectsDelayed,
+  divisionLabels,
+  divisionData,
+  practiceLabels,
+  practiceData,
+  employeeUtilCounts,
+      quickActions
     });
   } catch (error) {
-    console.error('Error fetching users:', error);
+    console.error('Error fetching admin dashboard data:', error);
+    // Fallback to simple render
     res.render('admin-welcome', {
       csrfToken: req.csrfToken(),
       title: 'Welcome Admin',
       layout: 'sidebar-layout',
-      users: []
+      users: [],
+      session: req.session
+  , employeeUtilCounts: [0,0,0]
     });
   }
 });
@@ -1708,14 +2035,23 @@ app.get('/api/practices/all', isAuth, isAdmin, async (req, res) => {
 // Bulk delete routes
 app.post('/project-master/bulk-delete', isAuth, isAdmin, csrfProtection, async (req, res) => {
   try {
-    const { projectIds } = req.body;
+    // Handle multiple possible field names for flexibility
+    const ids = req.body['ids[]'] || req.body.ids || req.body.projectIds;
     
-    if (!projectIds || !Array.isArray(projectIds)) {
-      return res.status(400).json({ success: false, message: 'Invalid project IDs' });
+    if (!ids) {
+      return res.status(400).json({ success: false, message: 'No project IDs provided' });
     }
     
-    await ProjectMaster.deleteMany({ _id: { $in: projectIds } });
-    res.json({ success: true, message: `${projectIds.length} projects deleted successfully` });
+    // Ensure ids is always an array
+    const idsArray = Array.isArray(ids) ? ids : [ids];
+    
+    if (idsArray.length === 0) {
+      return res.status(400).json({ success: false, message: 'No project IDs provided' });
+    }
+    
+  // Delete the projects
+  const result = await ProjectMaster.deleteMany({ _id: { $in: idsArray } });
+  res.json({ success: true, message: `${result.deletedCount} projects deleted successfully` });
   } catch (err) {
     console.error('Error bulk deleting projects:', err);
     res.status(500).json({ success: false, message: 'Failed to delete projects' });
@@ -1724,22 +2060,46 @@ app.post('/project-master/bulk-delete', isAuth, isAdmin, csrfProtection, async (
 
 app.post('/practice-master/bulk-delete', isAuth, isAdmin, csrfProtection, async (req, res) => {
   try {
-    const { practiceIds } = req.body;
-    
-    if (!practiceIds || !Array.isArray(practiceIds)) {
-      return res.status(400).json({ success: false, message: 'Invalid practice IDs' });
+    // Handle multiple possible field names for flexibility
+    const ids = req.body['ids[]'] || req.body.ids || req.body.practiceIds;
+    if (!ids) {
+      // If called via AJAX/fetch, return JSON
+      if (req.headers['content-type'] && req.headers['content-type'].includes('application/json')) {
+        return res.status(400).json({ success: false, message: 'No practice IDs provided' });
+      } else {
+        return res.status(400).send('No practices selected for deletion.');
+      }
     }
-    
-    await PracticeMaster.deleteMany({ _id: { $in: practiceIds } });
-    res.json({ success: true, message: `${practiceIds.length} practices deleted successfully` });
+    // Ensure ids is always an array
+    const idsArray = Array.isArray(ids) ? ids : [ids];
+    if (idsArray.length === 0) {
+      if (req.headers['content-type'] && req.headers['content-type'].includes('application/json')) {
+        return res.status(400).json({ success: false, message: 'No practice IDs provided' });
+      } else {
+        return res.status(400).send('No practices selected for deletion.');
+      }
+    }
+    // Delete the practices
+    const result = await PracticeMaster.deleteMany({ _id: { $in: idsArray } });
+    // If called via AJAX/fetch, return JSON
+    if (req.headers['content-type'] && req.headers['content-type'].includes('application/json')) {
+      return res.json({ success: true, message: `${result.deletedCount} practices deleted successfully` });
+    } else {
+      // If called via form, redirect
+      return res.redirect('/view-practice-master');
+    }
   } catch (err) {
     console.error('Error bulk deleting practices:', err);
-    res.status(500).json({ success: false, message: 'Failed to delete practices' });
+    if (req.headers['content-type'] && req.headers['content-type'].includes('application/json')) {
+      res.status(500).json({ success: false, message: 'Failed to delete practices' });
+    } else {
+      res.status(500).send('Error deleting practices.');
+    }
   }
 });
 
 // View Project Master
-app.get('/view-project-master', isAuth, isAdmin, async (req, res) => {
+app.get('/view-project-master', isAuth, isAdmin, csrfProtection, async (req, res) => {
   try {
     const projects = await ProjectMaster.find().lean();
 
@@ -1752,6 +2112,7 @@ app.get('/view-project-master', isAuth, isAdmin, async (req, res) => {
     res.render('view-project-master', {
       title: 'Project Master',
       projects,
+      csrfToken: req.csrfToken(),
       layout: 'sidebar-layout'
     });
   } catch (err) {
@@ -1882,50 +2243,6 @@ app.post('/project-master/delete/:id', isAuth, isAdmin, async (req, res) => {
   }
 });
 
-// Bulk delete projects route
-app.post('/project-master/bulk-delete', isAuth, isAdmin, async (req, res) => {
-  try {
-    const { ids } = req.body;
-    
-    if (!ids || !Array.isArray(ids) || ids.length === 0) {
-      return res.status(400).json({ success: false, message: 'No project IDs provided' });
-    }
-    
-    // Get original project data for audit logging
-    const originalProjects = await ProjectMaster.find({ _id: { $in: ids } });
-    
-    // Delete the projects
-    const result = await ProjectMaster.deleteMany({ _id: { $in: ids } });
-    
-    // Admin audit logging for bulk project deletion
-    if (originalProjects.length > 0) {
-      const projectNames = originalProjects.map(p => p.projectName).join(', ');
-      const description = `Admin ${req.session.user?.email} bulk deleted ${originalProjects.length} projects: ${projectNames} via admin-project-master-bulk-delete`;
-      const changes = {
-        operation: 'admin_bulk_delete_projects',
-        projectDetails: {
-          deletedCount: originalProjects.length,
-          deletedProjects: originalProjects.map(p => ({
-            projectName: p.projectName,
-            projectId: p._id,
-            deletedData: p.toObject()
-          }))
-        }
-      };
-      await logAuditAction(req, 'bulk_delete', null, originalProjects.map(p => p.toObject()), null, description, changes);
-    }
-    
-    res.json({ 
-      success: true, 
-      message: `Successfully deleted ${result.deletedCount} project(s)`,
-      deletedCount: result.deletedCount
-    });
-  } catch (err) {
-    console.error('Error bulk deleting projects:', err);
-    res.status(500).json({ success: false, message: 'Error deleting projects' });
-  }
-});
-
 
 
 
@@ -2004,14 +2321,19 @@ app.post('/upload-project-master', isAuth, isAdmin, upload.single('projectFile')
         const startDate = parseDate(row['Start Date']);
         const endDate = parseDate(row['End Date']);
 
-        await ProjectMaster.create({
-          projectName: row['Project Name'],
-          startDate,
-          endDate,
-          projectManager: row['Project Manager'],
-          cbslClient: row['CBSL Client'],
-          dihClient: row['DIH Division']
-        });
+        // Upsert by projectName to avoid duplicate ProjectMaster documents
+        await ProjectMaster.findOneAndUpdate(
+          { projectName: row['Project Name'] },
+          {
+            projectName: row['Project Name'],
+            startDate,
+            endDate,
+            projectManager: row['Project Manager'],
+            cbslClient: row['CBSL Client'],
+            dihClient: row['Division']
+          },
+          { upsert: true, new: true, setDefaultsOnInsert: true }
+        );
       }
     }
 
@@ -2059,28 +2381,6 @@ app.post('/practice-master/delete/:id', isAuth, isAdmin, async (req, res) => {
   }
 });
 
-// Bulk Delete Practices
-app.post('/practice-master/bulk-delete', isAuth, isAdmin, async (req, res) => {
-  try {
-    const ids = req.body['ids[]'];
-    if (!ids || (Array.isArray(ids) && ids.length === 0)) {
-      return res.status(400).send('No practices selected for deletion.');
-    }
-    
-    // Ensure ids is always an array
-    const idsArray = Array.isArray(ids) ? ids : [ids];
-    
-    // Delete multiple practices
-    const result = await PracticeMaster.deleteMany({ _id: { $in: idsArray } });
-    
-    console.log(`Bulk deleted ${result.deletedCount} practices`);
-    res.redirect('/view-practice-master');
-  } catch (err) {
-    console.error('Error bulk deleting practices:', err);
-    res.status(500).send('Error deleting practices.');
-  }
-});
-
 // Upload Practice Master GET
 app.get('/upload-practice-master', isAuth, isAdmin, csrfProtection, (req, res) => {
   res.render('upload-practice-master', { csrfToken: req.csrfToken() });
@@ -2122,10 +2422,15 @@ app.post('/upload-practice-master', isAuth, isAdmin, upload.single('practiceFile
 // });
 
 // View Practice Master
-app.get('/view-practice-master', isAuth, isAdmin, async (req, res) => {
+app.get('/view-practice-master', isAuth, isAdmin, csrfProtection, async (req, res) => {
   try {
     const practices = await PracticeMaster.find();
-    res.render('view-practice-master', { practices });
+    res.render('view-practice-master', { 
+      practices,
+      csrfToken: req.csrfToken(),
+      title: 'Practice Master',
+      layout: 'sidebar-layout'
+    });
   } catch (err) {
     console.error("Error fetching practice master:", err);
     res.status(500).send('Error loading practice master.');
@@ -2472,6 +2777,93 @@ app.delete('/assigned-resources/:id', isAuth, isAdmin, async (req, res) => {
   }
 });
 
+// BULK DELETE: Remove multiple schedules (Admin only)
+app.post('/assigned-resources/bulk-delete', isAuth, isAdmin, async (req, res) => {
+  try {
+    console.log('📍 Bulk delete request received:', req.body);
+    
+    const ids = req.body['ids[]'] || req.body.ids || req.body.scheduleIds;
+    
+    if (!ids) {
+      console.log('❌ No IDs provided in request');
+      return res.status(400).json({ success: false, error: 'No schedule IDs provided' });
+    }
+    
+    // Ensure ids is always an array
+    const idsArray = Array.isArray(ids) ? ids : [ids];
+    
+    if (idsArray.length === 0) {
+      console.log('❌ Empty IDs array');
+      return res.status(400).json({ success: false, error: 'No schedule IDs provided' });
+    }
+    
+    console.log('🎯 Processing bulk delete for IDs:', idsArray);
+    
+    // Get original schedules for audit logging before deletion
+    const originalSchedules = await AssignedSchedule.find({ _id: { $in: idsArray } }).populate('employee').populate('project');
+    
+    // Delete the schedules
+    const result = await AssignedSchedule.deleteMany({ _id: { $in: idsArray } });
+    
+    if (result.deletedCount > 0) {
+      // Create consolidated audit log for bulk deletion
+      const deletedSchedulesInfo = originalSchedules.map(s => ({
+        empCode: s.employee?.empCode || 'N/A',
+        empName: s.employee?.name || 'N/A',
+        projectName: s.project?.projectName || 'N/A',
+        assignmentId: s._id
+      }));
+      
+      const employeeNames = deletedSchedulesInfo.map(s => `${s.empCode} (${s.empName})`).join(', ');
+      const projectNames = [...new Set(deletedSchedulesInfo.map(s => s.projectName))].join(', ');
+      
+      const description = `Admin ${req.session.user?.email} bulk deleted ${result.deletedCount} assignments for employees: ${employeeNames} from projects: ${projectNames} via admin-assigned-resources-bulk-delete`;
+      
+      const changes = {
+        operation: 'admin_bulk_delete_assignments',
+        deletedCount: result.deletedCount,
+        deletedSchedules: deletedSchedulesInfo,
+        employeeCount: [...new Set(deletedSchedulesInfo.map(s => s.empCode))].length,
+        projectCount: [...new Set(deletedSchedulesInfo.map(s => s.projectName))].length
+      };
+      
+      // For bulk operations, use the first employee and project info for the main fields
+      const firstEmployee = originalSchedules[0]?.employee;
+      const firstProject = originalSchedules[0]?.project;
+      
+      // Create a custom audit log entry that populates the Employee and Project columns properly
+      const auditEntry = await AuditLog.create({
+        manager: req.session.user?.email || 'Unknown',
+        managerName: req.session.user?.email?.split('@')[0] || 'Unknown',
+        userRole: req.session.user?.role || 'admin',
+        action: 'delete',
+        assignmentId: originalSchedules[0]?._id,
+        employeeCode: result.deletedCount === 1 ? firstEmployee?.empCode : `${result.deletedCount} employees`,
+        employeeName: result.deletedCount === 1 ? firstEmployee?.name : employeeNames,
+        projectName: [...new Set(deletedSchedulesInfo.map(s => s.projectName))].length === 1 ? 
+                    deletedSchedulesInfo[0].projectName : 
+                    `${[...new Set(deletedSchedulesInfo.map(s => s.projectName))].length} projects`,
+        description: description,
+        changes: changes,
+        before: { bulk: true, schedules: originalSchedules.map(s => s.toObject()) },
+        after: null,
+        route: req.originalUrl || '/assigned-resources',
+        ipAddress: req.ip || req.connection.remoteAddress,
+        userAgent: req.get('User-Agent'),
+        timestamp: new Date()
+      });
+      
+      res.json({ success: true, message: `Successfully deleted ${result.deletedCount} schedule(s)` });
+    } else {
+      res.status(404).json({ success: false, error: 'No schedules found or already deleted' });
+    }
+  } catch (err) {
+    console.error('❌ Error in bulk delete assigned-resources:', err);
+    console.error('❌ Stack trace:', err.stack);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 
 
 // Admin: View Audit Logs (removed duplicate route - using main /audit-logs route with CSRF protection)
@@ -2628,28 +3020,67 @@ app.post('/employees/:id/edit', isAuth, isAdmin, csrfProtection, async (req, res
 // Delete Employee POST
 app.post('/employees/:id/delete', isAuth, isAdmin, csrfProtection, async (req, res) => {
   try {
+    const empCode = req.params.id;
+    
     // Get original employee data for audit logging
-    const originalEmployee = await Employee.findOne({ empCode: req.params.id });
+    const originalEmployee = await Employee.findOne({ empCode });
     
-    await Employee.deleteOne({ empCode: req.params.id });
-    
-    // Admin audit logging for employee deletion
-    if (originalEmployee) {
-      const description = `Admin ${req.session.user?.email} deleted employee: ${req.params.id} (${originalEmployee.name}) via admin-delete-employee`;
-      const changes = {
-        operation: 'admin_delete_employee',
-        employeeDetails: {
-          empCode: req.params.id,
-          deletedData: originalEmployee.toObject()
-        }
-      };
-      await logAuditAction(req, 'delete', null, originalEmployee.toObject(), null, description, changes);
+    if (!originalEmployee) {
+      return res.status(404).send('Employee not found');
     }
     
+    // Use cascade delete helper function
+    const deleteResult = await cascadeDeleteEmployees([empCode], {
+      adminEmail: req.session.user?.email,
+      route: 'admin-delete-employee'
+    });
+    
+    if (!deleteResult.success) {
+      console.error('Cascade delete failed:', deleteResult.error);
+      return res.status(500).send('Error deleting employee: ' + deleteResult.error);
+    }
+    
+    // Admin audit logging for employee deletion
+    const description = `Admin ${req.session.user?.email} deleted employee: ${empCode} (${originalEmployee.name}) and ${deleteResult.deletedSchedules} related schedule assignments via admin-delete-employee`;
+    const changes = {
+      operation: 'admin_delete_employee',
+      employeeDetails: {
+        empCode: empCode,
+        deletedData: originalEmployee.toObject()
+      },
+      cascadeDetails: {
+        deletedSchedulesCount: deleteResult.deletedSchedules,
+        deletedSchedules: deleteResult.scheduleDetails
+      }
+    };
+    await logAuditAction(req, 'delete', null, originalEmployee.toObject(), null, description, changes);
+    
+    console.log(`✅ Successfully deleted employee ${empCode} and ${deleteResult.deletedSchedules} related schedule assignments`);
     res.redirect('/dashboard/admin/view-employees');
   } catch (err) {
     console.error('Delete Employee Error:', err);
     res.status(500).send('Error deleting employee');
+  }
+});
+
+// Check employee deletion dependencies (API endpoint for preview)
+app.post('/employees/check-dependencies', isAuth, isAdmin, csrfProtection, async (req, res) => {
+  try {
+    const { empCodes } = req.body;
+    
+    if (!empCodes || !Array.isArray(empCodes) || empCodes.length === 0) {
+      return res.status(400).json({ success: false, message: 'No employee codes provided' });
+    }
+    
+    const dependencies = await checkEmployeeDependencies(empCodes);
+    
+    res.json({
+      success: true,
+      dependencies: dependencies
+    });
+  } catch (err) {
+    console.error('Error checking employee dependencies:', err);
+    res.status(500).json({ success: false, message: 'Error checking dependencies' });
   }
 });
 
@@ -2665,31 +3096,51 @@ app.post('/employees/bulk-delete', isAuth, isAdmin, csrfProtection, async (req, 
     // Get original employee data for audit logging
     const originalEmployees = await Employee.find({ empCode: { $in: empCodes } });
     
-    // Delete the employees
-    const result = await Employee.deleteMany({ empCode: { $in: empCodes } });
+    if (originalEmployees.length === 0) {
+      return res.status(404).json({ success: false, message: 'No employees found with provided codes' });
+    }
+    
+    // Use cascade delete helper function
+    const deleteResult = await cascadeDeleteEmployees(empCodes, {
+      adminEmail: req.session.user?.email,
+      route: 'admin-bulk-delete-employees'
+    });
+    
+    if (!deleteResult.success) {
+      console.error('Bulk cascade delete failed:', deleteResult.error);
+      return res.status(500).json({ 
+        success: false, 
+        message: 'Error deleting employees: ' + deleteResult.error 
+      });
+    }
     
     // Admin audit logging for bulk employee deletion
-    if (originalEmployees.length > 0) {
-      const employeeNames = originalEmployees.map(e => `${e.empCode} (${e.name})`).join(', ');
-      const description = `Admin ${req.session.user?.email} bulk deleted ${originalEmployees.length} employees: ${employeeNames} via admin-bulk-delete-employees`;
-      const changes = {
-        operation: 'admin_bulk_delete_employees',
-        employeeDetails: {
-          deletedCount: originalEmployees.length,
-          deletedEmployees: originalEmployees.map(e => ({
-            empCode: e.empCode,
-            name: e.name,
-            deletedData: e.toObject()
-          }))
-        }
-      };
-      await logAuditAction(req, 'bulk_delete', null, originalEmployees.map(e => e.toObject()), null, description, changes);
-    }
+    const employeeNames = originalEmployees.map(e => `${e.empCode} (${e.name})`).join(', ');
+    const description = `Admin ${req.session.user?.email} bulk deleted ${deleteResult.deletedEmployees} employees: ${employeeNames} and ${deleteResult.deletedSchedules} related schedule assignments via admin-bulk-delete-employees`;
+    const changes = {
+      operation: 'admin_bulk_delete_employees',
+      employeeDetails: {
+        deletedCount: deleteResult.deletedEmployees,
+        deletedEmployees: originalEmployees.map(e => ({
+          empCode: e.empCode,
+          name: e.name,
+          deletedData: e.toObject()
+        }))
+      },
+      cascadeDetails: {
+        deletedSchedulesCount: deleteResult.deletedSchedules,
+        deletedSchedules: deleteResult.scheduleDetails
+      }
+    };
+    await logAuditAction(req, 'bulk_delete', null, originalEmployees.map(e => e.toObject()), null, description, changes);
+    
+    console.log(`✅ Successfully bulk deleted ${deleteResult.deletedEmployees} employees and ${deleteResult.deletedSchedules} related schedule assignments`);
     
     res.json({ 
       success: true, 
-      message: `Successfully deleted ${result.deletedCount} employee(s)`,
-      deletedCount: result.deletedCount
+      message: `Successfully deleted ${deleteResult.deletedEmployees} employee(s) and ${deleteResult.deletedSchedules} related schedule assignments`,
+      deletedCount: deleteResult.deletedEmployees,
+      deletedSchedulesCount: deleteResult.deletedSchedules
     });
   } catch (err) {
     console.error('Error bulk deleting employees:', err);
@@ -3350,7 +3801,7 @@ app.get('/audit-logs', isAuth, isAdmin, csrfProtection, async (req, res) => {
       message: req.query.message || '',
       error: req.query.error || '',
       csrfToken: req.csrfToken(),
-      title: 'Admin & Manager Audit Logs',
+      title: 'Audit Logs',
       layout: 'sidebar-layout'
     });
   } catch (err) {
@@ -4633,6 +5084,505 @@ app.get('/view-users', isAuth, isAdmin, csrfProtection, async (req, res) => {
     });
   }
 });
+
+// Project Allocation Report Routes
+app.get('/api/projects/list', isAuth, async (req, res) => {
+  try {
+    const projects = await ProjectMaster.find({}, 'projectName _id').sort({ projectName: 1 });
+    res.json({ success: true, projects });
+  } catch (error) {
+    console.error('Error fetching projects:', error);
+    res.status(500).json({ success: false, error: 'Failed to fetch projects' });
+  }
+});
+
+// Project Allocation Report - Main Route
+app.get('/project-allocation-report', isAuth, csrfProtection, async (req, res) => {
+  try {
+    const { projectId, startDate, endDate, division, cbslClient } = req.query;
+    
+    // Get all projects for dropdown
+    const projects = await ProjectMaster.find({}, 'projectName _id').sort({ projectName: 1 });
+    
+    // Get distinct divisions (dihClient) and CBSL clients for dropdowns
+    const divisions = await ProjectMaster.distinct('dihClient').then(vals => vals.filter(v => v));
+    const cbslClients = await ProjectMaster.distinct('cbslClient').then(vals => vals.filter(v => v));
+    
+    let reportData = null;
+    let selectedProject = null;
+    
+    if (projectId) {
+      selectedProject = await ProjectMaster.findById(projectId);
+      
+      // Build date range for report (default to current year if not specified)
+      const start = startDate ? new Date(startDate) : new Date(new Date().getFullYear(), 0, 1);
+      const end = endDate ? new Date(endDate) : new Date(new Date().getFullYear(), 11, 31);
+      
+      // Aggregate data from AssignedSchedule collection
+      const schedules = await AssignedSchedule.find({ project: projectId })
+        .populate('employee', 'empCode name homePractice')
+        .populate('project', 'projectName cbslClient dihClient')
+        .populate('practice', 'practiceName');
+      
+      // Process the data to create pivot table structure
+      reportData = processAllocationData(schedules, start, end);
+    } else if (division || cbslClient) {
+      // Filter projects based on division or cbslClient
+      const projectFilter = {};
+      if (division) projectFilter.dihClient = division;
+      if (cbslClient) projectFilter.cbslClient = cbslClient;
+      
+      const filteredProjects = await ProjectMaster.find(projectFilter, '_id');
+      const projectIds = filteredProjects.map(p => p._id);
+      
+      if (projectIds.length > 0) {
+        // Build date range for report (default to current year if not specified)
+        const start = startDate ? new Date(startDate) : new Date(new Date().getFullYear(), 0, 1);
+        const end = endDate ? new Date(endDate) : new Date(new Date().getFullYear(), 11, 31);
+        
+        // Aggregate data from AssignedSchedule collection for all filtered projects
+        const schedules = await AssignedSchedule.find({ project: { $in: projectIds } })
+          .populate('employee', 'empCode name homePractice')
+          .populate('project', 'projectName cbslClient dihClient')
+          .populate('practice', 'practiceName');
+        
+        // Process the data to create pivot table structure
+        reportData = processAllocationData(schedules, start, end);
+      }
+    }
+    
+    const isManagerRole = req.session.user?.role === 'manager';
+    
+    res.render('project-allocation-report', {
+      title: 'Project Allocation Report',
+      layout: 'sidebar-layout',
+      manager: isManagerRole,
+      projects,
+      divisions,
+      cbslClients,
+      selectedProject,
+      reportData,
+      selectedProjectId: projectId || '',
+      selectedDivision: division || '',
+      selectedCbslClient: cbslClient || '',
+      startDate: req.query.startDate || '',
+      endDate: req.query.endDate || '',
+      csrfToken: req.csrfToken ? req.csrfToken() : ''
+    });
+  } catch (error) {
+    console.error('Error in project allocation report:', error);
+    res.status(500).send('Error generating report');
+  }
+});
+
+// Excel Export Route
+app.get('/project-allocation-report/export/excel', isAuth, async (req, res) => {
+  try {
+    const { projectId, startDate, endDate, division, cbslClient } = req.query;
+    
+    // Ensure start/end are always defined for processing
+    const start = startDate ? new Date(startDate) : new Date(new Date().getFullYear(), 0, 1);
+    const end = endDate ? new Date(endDate) : new Date(new Date().getFullYear(), 11, 31);
+
+    let selectedProject = null;
+    let schedules = [];
+    
+    if (projectId) {
+      selectedProject = await ProjectMaster.findById(projectId);
+      schedules = await AssignedSchedule.find({ project: projectId })
+        .populate('employee', 'empCode name homePractice')
+        .populate('project', 'projectName cbslClient dihClient')
+        .populate('practice', 'practiceName');
+    } else if (division || cbslClient) {
+      const projectFilter = {};
+      if (division) projectFilter.dihClient = division;
+      if (cbslClient) projectFilter.cbslClient = cbslClient;
+      
+      const filteredProjects = await ProjectMaster.find(projectFilter, '_id');
+      const projectIds = filteredProjects.map(p => p._id);
+      
+      if (projectIds.length > 0) {
+        schedules = await AssignedSchedule.find({ project: { $in: projectIds } })
+          .populate('employee', 'empCode name homePractice')
+          .populate('project', 'projectName cbslClient dihClient')
+          .populate('practice', 'practiceName');
+      }
+    } else {
+      return res.status(400).send('Project ID, Division, or CBSL Client is required for export');
+    }
+    
+    const reportData = processAllocationData(schedules, start, end);
+    
+    // Create Excel workbook
+    const workbook = xlsx.utils.book_new();
+    
+    // Create worksheet data (FTE only per month)
+    const worksheetData = [];
+
+    // Header row: for each month include FTE, then Total FTE
+    const headerRow = ['Practice'];
+    reportData.months.forEach(month => {
+      headerRow.push(`${month} (FTE)`);
+    });
+    headerRow.push('Total FTE');
+    worksheetData.push(headerRow);
+
+    // Data rows: push FTE for each month
+    reportData.practices.forEach(practice => {
+      const row = [practice.name];
+      reportData.months.forEach(month => {
+        const allocation = reportData.matrix[practice.name] && reportData.matrix[practice.name][month];
+        const fte = allocation && (typeof allocation.fte !== 'undefined') ? allocation.fte : (reportData.monthWorkingHours && reportData.monthWorkingHours[month] ? Number(((allocation ? allocation.totalHours : 0) / reportData.monthWorkingHours[month]).toFixed(2)) : 0);
+        row.push(fte);
+      });
+      row.push(practice.totalFTE || 0);
+      worksheetData.push(row);
+    });
+
+    // Total row: per-month FTEs
+    const totalRow = ['Total'];
+    reportData.months.forEach(month => {
+      totalRow.push(reportData.monthFTEs && typeof reportData.monthFTEs[month] !== 'undefined' ? reportData.monthFTEs[month] : (reportData.monthWorkingHours && reportData.monthWorkingHours[month] ? Number(((reportData.monthTotals[month]||0)/reportData.monthWorkingHours[month]).toFixed(2)) : 0));
+    });
+    totalRow.push(reportData.grandTotalFTE || 0);
+    worksheetData.push(totalRow);
+    
+    const worksheet = xlsx.utils.aoa_to_sheet(worksheetData);
+    xlsx.utils.book_append_sheet(workbook, worksheet, 'Project Allocation');
+    
+    // Generate buffer
+    const buffer = xlsx.write(workbook, { type: 'buffer', bookType: 'xlsx' });
+    
+    // Set headers for download
+    let filename = 'Allocation_Report';
+    if (selectedProject) {
+      filename = `${selectedProject.projectName}_Allocation_Report`;
+    } else if (division && cbslClient) {
+      filename = `${division}_${cbslClient}_Allocation_Report`;
+    } else if (division) {
+      filename = `${division}_Division_Allocation_Report`;
+    } else if (cbslClient) {
+      filename = `${cbslClient}_Client_Allocation_Report`;
+    }
+    filename += `_${new Date().toISOString().slice(0, 10)}.xlsx`;
+    
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    
+    res.send(buffer);
+  } catch (error) {
+    console.error('Error exporting to Excel:', error);
+    res.status(500).send('Error exporting report');
+  }
+});
+
+// PDF Export Route  
+app.get('/project-allocation-report/export/pdf', isAuth, async (req, res) => {
+  try {
+    const { projectId, startDate, endDate, division, cbslClient } = req.query;
+    
+    let selectedProject = null;
+    let schedules = [];
+    let reportTitle = 'Project Allocation Report';
+    
+    if (projectId) {
+      selectedProject = await ProjectMaster.findById(projectId);
+      const start = startDate ? new Date(startDate) : new Date(new Date().getFullYear(), 0, 1);
+      const end = endDate ? new Date(endDate) : new Date(new Date().getFullYear(), 11, 31);
+      
+      schedules = await AssignedSchedule.find({ project: projectId })
+        .populate('employee', 'empCode name homePractice')
+        .populate('project', 'projectName cbslClient dihClient')
+        .populate('practice', 'practiceName');
+      
+      reportTitle = `${selectedProject.projectName} - Allocation Report`;
+    } else if (division || cbslClient) {
+      const projectFilter = {};
+      if (division) projectFilter.dihClient = division;
+      if (cbslClient) projectFilter.cbslClient = cbslClient;
+      
+      const filteredProjects = await ProjectMaster.find(projectFilter, '_id');
+      const projectIds = filteredProjects.map(p => p._id);
+      
+      if (projectIds.length > 0) {
+        const start = startDate ? new Date(startDate) : new Date(new Date().getFullYear(), 0, 1);
+        const end = endDate ? new Date(endDate) : new Date(new Date().getFullYear(), 11, 31);
+        
+        schedules = await AssignedSchedule.find({ project: { $in: projectIds } })
+          .populate('employee', 'empCode name homePractice')
+          .populate('project', 'projectName cbslClient dihClient')
+          .populate('practice', 'practiceName');
+        
+        if (division && cbslClient) {
+          reportTitle = `${division} Division - ${cbslClient} Client - Allocation Report`;
+        } else if (division) {
+          reportTitle = `${division} Division - Allocation Report`;
+        } else if (cbslClient) {
+          reportTitle = `${cbslClient} Client - Allocation Report`;
+        }
+      }
+    } else {
+      return res.status(400).send('Project ID, Division, or CBSL Client is required for export');
+    }
+    
+    const start = startDate ? new Date(startDate) : new Date(new Date().getFullYear(), 0, 1);
+    const end = endDate ? new Date(endDate) : new Date(new Date().getFullYear(), 11, 31);
+    
+    const reportData = processAllocationData(schedules, start, end);
+    
+    // Generate HTML content for PDF
+    const htmlContent = generatePDFContent({ projectName: reportTitle }, reportData, start, end);
+    
+    // For now, we'll send HTML content. In production, you'd use a PDF library like puppeteer
+    res.setHeader('Content-Type', 'text/html');
+    res.send(htmlContent);
+    
+  } catch (error) {
+    console.error('Error exporting to PDF:', error);
+    res.status(500).send('Error exporting report');
+  }
+});
+
+// Helper function to process allocation data into pivot table format
+function processAllocationData(schedules, startDate, endDate) {
+  const matrix = {};
+  const practices = new Set();
+  const monthsSet = new Set();
+  const monthTotals = {};
+  const monthWorkingHours = {}; // total working hours per month (weekdays * 8h)
+  
+  // Generate all months in the date range
+  const months = [];
+  const current = new Date(startDate.getFullYear(), startDate.getMonth(), 1);
+  const endMonth = new Date(endDate.getFullYear(), endDate.getMonth(), 1);
+  
+  while (current <= endMonth) {
+    const monthKey = current.toLocaleDateString('en-US', { year: 'numeric', month: 'short' });
+    months.push(monthKey);
+    monthsSet.add(monthKey);
+    monthTotals[monthKey] = 0;
+    monthWorkingHours[monthKey] = 0; // will compute below
+    current.setMonth(current.getMonth() + 1);
+  }
+
+  // Compute working hours per month (assume 8 working hours per weekday, skip weekends).
+  // If startDate/endDate constrain the first/last month, only count days within the range.
+  function countWeekdaysInRange(year, monthIndex, rangeStart, rangeEnd) {
+    const firstDay = new Date(year, monthIndex, 1);
+    const lastDay = new Date(year, monthIndex + 1, 0);
+    const start = rangeStart > firstDay ? rangeStart : firstDay;
+    const end = rangeEnd < lastDay ? rangeEnd : lastDay;
+    if (start > end) return 0;
+    let count = 0;
+    for (let d = new Date(start); d <= end; d.setDate(d.getDate() + 1)) {
+      const day = d.getDay();
+      if (day !== 0 && day !== 6) count++; // Mon-Fri
+    }
+    return count;
+  }
+
+  // Fill monthWorkingHours using months array
+  months.forEach(monthKey => {
+    // parse monthKey like "Jul 2024" or "Jul 2024" depending on locale; we created it using toLocaleDateString
+    const parts = monthKey.split(' ');
+    // parts: ["Jul", "2024"] or ["Jul", "2024"]
+    const monthName = parts[0];
+    const year = parseInt(parts[1], 10);
+    const monthIndex = new Date(`${monthName} 1, ${year}`).getMonth();
+    const weekdays = countWeekdaysInRange(year, monthIndex, new Date(startDate.getFullYear(), startDate.getMonth(), 1), new Date(endDate.getFullYear(), endDate.getMonth() + 1, 0));
+    monthWorkingHours[monthKey] = weekdays * 8; // 8 hours per working day
+  });
+  
+  // Process each schedule
+  schedules.forEach(schedule => {
+    const practice = schedule.employee?.homePractice || 'Unassigned';
+    practices.add(practice);
+    
+    if (!matrix[practice]) {
+      matrix[practice] = {};
+    }
+    
+    // Process daily hours
+    if (schedule.dailyHours) {
+      Object.keys(schedule.dailyHours).forEach(dateKey => {
+        const hours = Number(schedule.dailyHours[dateKey]) || 0;
+        
+        // Parse date key (format: "1-Jul-2024", "1-Aug-2025", or "2024-07-01")
+        let dateObj;
+        if (dateKey.includes('-') && dateKey.length > 8) {
+          // Format: "1-Jul-2024" or "1-Aug-2025"
+          const parts = dateKey.split('-');
+          if (parts.length === 3) {
+            const day = parseInt(parts[0]);
+            const monthName = parts[1];
+            const year = parseInt(parts[2]);
+            const monthIndex = new Date(`${monthName} 1, 2000`).getMonth();
+            dateObj = new Date(year, monthIndex, day);
+          }
+        } else if (dateKey.includes('-')) {
+          // Format: "2024-07-01"
+          dateObj = new Date(dateKey);
+        }
+        
+        // More lenient date filtering - include dates that fall within the month range
+        if (dateObj && isValidDate(dateObj)) {
+          const monthKey = dateObj.toLocaleDateString('en-US', { year: 'numeric', month: 'short' });
+          
+          // Check if the date falls within our target months (regardless of exact start/end date)
+          if (monthsSet.has(monthKey)) {
+            // Additional check: ensure the date is within the general timeframe
+            const isWithinRange = dateObj >= new Date(startDate.getFullYear(), startDate.getMonth(), 1) && 
+                                 dateObj <= new Date(endDate.getFullYear(), endDate.getMonth() + 1, 0);
+            
+            if (isWithinRange) {
+              if (!matrix[practice][monthKey]) {
+                matrix[practice][monthKey] = { totalHours: 0, details: [], fte: 0 };
+              }
+              
+              matrix[practice][monthKey].totalHours += hours;
+              matrix[practice][monthKey].details.push({
+                employee: schedule.employee?.name || 'Unknown',
+                empCode: schedule.employee?.empCode || 'Unknown',
+                date: dateKey,
+                hours: hours
+              });
+              
+              monthTotals[monthKey] += hours;
+            }
+          }
+        }
+      });
+    }
+  });
+  
+  // Convert practices set to array with totals
+  const practicesArray = Array.from(practices).map(practiceName => {
+    let totalHours = 0;
+    months.forEach(month => {
+      if (matrix[practiceName] && matrix[practiceName][month]) {
+        totalHours += matrix[practiceName][month].totalHours;
+      }
+    });
+    return {
+      name: practiceName,
+      totalHours: totalHours,
+      totalFTE: 0 // will compute below
+    };
+  }).sort((a, b) => b.totalHours - a.totalHours);
+
+  // Compute FTE values per cell, per month totals and per-practice totals
+  const totalWorkingHoursAcrossRange = months.reduce((sum, m) => sum + (monthWorkingHours[m] || 0), 0) || 1;
+
+  // per-month FTEs
+  const monthFTEs = {};
+  months.forEach(month => {
+    const w = monthWorkingHours[month] || 1;
+    monthFTEs[month] = Number(((monthTotals[month] || 0) / w).toFixed(2));
+  });
+
+  // per-cell and per-practice - UPDATED: Sum monthly FTEs instead of averaging across range
+  practicesArray.forEach(pr => {
+    let sumOfMonthlyFTEs = 0; // Sum of FTEs across months instead of total hours/range
+    months.forEach(month => {
+      if (matrix[pr.name] && matrix[pr.name][month]) {
+        const alloc = matrix[pr.name][month];
+        const w = monthWorkingHours[month] || 1;
+        alloc.fte = Number((alloc.totalHours / w).toFixed(2));
+        sumOfMonthlyFTEs += alloc.fte; // Add this month's FTE to the sum
+      }
+    });
+    pr.totalFTE = Number(sumOfMonthlyFTEs.toFixed(2)); // Total is now sum of monthly FTEs
+  });
+
+  // Grand total FTE is now sum of monthly FTEs instead of average across range
+  const grandTotalFTE = Number(Object.values(monthFTEs).reduce((sum, fte) => sum + fte, 0).toFixed(2));
+  
+  return {
+    matrix,
+    practices: practicesArray,
+    months,
+    monthTotals,
+  monthWorkingHours,
+  monthFTEs,
+    grandTotal: Object.values(monthTotals).reduce((sum, val) => sum + val, 0)
+  ,grandTotalFTE
+  };
+}
+
+// Helper function to validate date objects
+function isValidDate(date) {
+  return date instanceof Date && !isNaN(date);
+}
+
+// Helper function to generate PDF content
+function generatePDFContent(project, reportData, startDate, endDate) {
+  const startStr = startDate.toLocaleDateString();
+  const endStr = endDate.toLocaleDateString();
+  
+  let html = `
+    <!DOCTYPE html>
+    <html>
+    <head>
+      <title>Project Allocation Report</title>
+      <style>
+        body { font-family: Arial, sans-serif; margin: 20px; }
+        h1 { color: #2c3e50; text-align: center; }
+        .header-info { text-align: center; margin-bottom: 30px; }
+        table { width: 100%; border-collapse: collapse; margin: 20px 0; }
+        th, td { border: 1px solid #ddd; padding: 8px; text-align: center; }
+        th { background-color: #f2f2f2; font-weight: bold; }
+        .practice-name { text-align: left; font-weight: bold; }
+        .total-row { background-color: #e8f4f8; font-weight: bold; }
+        .generated-info { text-align: center; margin-top: 30px; color: #666; font-size: 12px; }
+      </style>
+    </head>
+    <body>
+      <h1>Project Allocation Report</h1>
+      <div class="header-info">
+        <p><strong>Project:</strong> ${project.projectName}</p>
+        <p><strong>Period:</strong> ${startStr} to ${endStr}</p>
+      </div>
+      
+      <table>
+        <thead>
+          <tr>
+            <th>Practice</th>
+            ${reportData.months.map(month => `<th>${month} (FTE)</th>`).join('')}
+            <th>Total FTE</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${reportData.practices.map(practice => `
+            <tr>
+              <td class="practice-name">${practice.name}</td>
+              ${reportData.months.map(month => {
+                const allocation = reportData.matrix[practice.name] && reportData.matrix[practice.name][month];
+                const fte = allocation && (typeof allocation.fte !== 'undefined') ? allocation.fte : (reportData.monthWorkingHours && reportData.monthWorkingHours[month] ? Number(((allocation ? allocation.totalHours : 0) / reportData.monthWorkingHours[month]).toFixed(2)) : 0);
+                return `<td>${fte}</td>`;
+              }).join('')}
+              <td><strong>${practice.totalFTE || 0}</strong></td>
+            </tr>
+          `).join('')}
+          <tr class="total-row">
+            <td>Total</td>
+            ${reportData.months.map(month => {
+              const fte = reportData.monthFTEs && typeof reportData.monthFTEs[month] !== 'undefined' ? reportData.monthFTEs[month] : (reportData.monthWorkingHours && reportData.monthWorkingHours[month] ? Number(((reportData.monthTotals[month]||0)/reportData.monthWorkingHours[month]).toFixed(2)) : 0);
+              return `<td>${fte}</td>`;
+            }).join('')}
+            <td><strong>${reportData.grandTotalFTE || 0}</strong></td>
+          </tr>
+        </tbody>
+      </table>
+      
+      <div class="generated-info">
+        <p>Report generated on ${new Date().toLocaleString()}</p>
+      </div>
+    </body>
+    </html>
+  `;
+  
+  return html;
+}
 // Logout
 app.get('/logout', (req, res) => {
   req.session.destroy(() => {

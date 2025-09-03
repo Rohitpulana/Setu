@@ -4,6 +4,12 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title><%= title %></title>
+    
+    <!-- Favicon -->
+    <link rel="icon" type="image/jpeg" href="/logo.jpg">
+    <link rel="shortcut icon" type="image/jpeg" href="/logo.jpg">
+    <link rel="apple-touch-icon" href="/logo.jpg">
+    
     <link rel="stylesheet" href="/stylesheets/styles.css">
     <style>
         .audit-table {
@@ -224,6 +230,45 @@
             margin: 0 auto;
             padding: 20px;
         }
+        .button-group {
+            display: flex;
+            gap: 10px;
+            align-items: center;
+        }
+        .filter-btn, .reset-btn {
+            /* Use inline-flex so both elements (button and anchor) center content identically */
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+            height: 44px; /* fixed height to ensure identical vertical size */
+            padding: 0 20px; /* horizontal padding only, vertical centered by flex */
+            border: none;
+            border-radius: 6px;
+            cursor: pointer;
+            text-decoration: none;
+            font-size: 14px;
+            font-weight: 600;
+            transition: background-color 0.15s, transform 0.08s;
+            min-width: 120px; /* ensures buttons have same width regardless of label */
+            box-sizing: border-box;
+        }
+        .filter-btn {
+            background-color: #007bff;
+            color: white;
+        }
+        .filter-btn:hover {
+            background-color: #0056b3;
+            transform: translateY(-1px);
+        }
+        .reset-btn {
+            background-color: #3498db;
+            color: white;
+        }
+        .reset-btn:hover {
+            background-color: #2980b9;
+            transform: translateY(-1px);
+        }
     </style>
 </head>
 <body>
@@ -239,7 +284,10 @@
 
         <!-- Filters -->
         <div class="filters">
-            <form method="GET" action="/audit-logs">
+            <form id="filterForm" method="GET" action="/audit-logs">
+                <div id="dateError" class="alert alert-danger" style="display:none; margin-top:10px; padding:8px 12px;">
+                    <!-- date validation errors will appear here -->
+                </div>
                 <div class="filter-row">
                     <div class="filter-group">
                         <label>User Email:</label>
@@ -266,16 +314,18 @@
                     </div>
                     <div class="filter-group">
                         <label>Date From:</label>
-                        <input type="date" name="dateFrom" value="<%= dateFrom %>">
+                        <input id="dateFrom" type="date" name="dateFrom" value="<%= dateFrom %>">
                     </div>
                     <div class="filter-group">
                         <label>Date To:</label>
-                        <input type="date" name="dateTo" value="<%= dateTo %>">
+                        <input id="dateTo" type="date" name="dateTo" value="<%= dateTo %>">
                     </div>
                     <div class="filter-group">
                         <label>&nbsp;</label>
-                        <button type="submit">Filter</button>
-                        <a href="/audit-logs">Reset</a>
+                        <div class="button-group">
+                            <button type="submit" class="filter-btn">Filter</button>
+                            <a href="/audit-logs" class="reset-btn">Reset</a>
+                        </div>
                     </div>
                 </div>
             </form>
@@ -288,7 +338,7 @@
         <table class="audit-table">
             <thead>
                 <tr>
-                    <th>Timestamp</th>
+                    <th>Date</th>
                     <th>User</th>
                     <th>Role</th>
                     <th>Action</th>
@@ -301,7 +351,7 @@
             <tbody>
                 <% auditLogs.forEach(log => { %>
                     <tr class="<%= log.isReverted ? 'reverted' : '' %>" data-log-id="<%= log._id %>">
-                        <td><%= new Date(log.timestamp).toLocaleString() %></td>
+                        <td><%= new Date(log.timestamp).toLocaleDateString() %></td>
                         <td><%= log.managerName || log.manager %></td>
                         <td><span class="<%= log.userRole === 'admin' ? 'role-admin' : 'role-manager' %>"><%= (log.userRole || 'manager').toUpperCase() %></span></td>
                         <td class="action-<%= log.action %>"><%= log.action.toUpperCase() %></td>
@@ -363,18 +413,13 @@
                 console.log('Log Data:', logData);
                 console.log('Changes:', logData.changes);
                 
-                // Format the timestamp
+                // Format the timestamp (date only)
                 const timestamp = new Date(logData.timestamp);
                 const formattedDate = timestamp.toLocaleDateString('en-US', {
                     weekday: 'long',
                     year: 'numeric',
                     month: 'long',
                     day: 'numeric'
-                });
-                const formattedTime = timestamp.toLocaleTimeString('en-US', {
-                    hour: '2-digit',
-                    minute: '2-digit',
-                    second: '2-digit'
                 });
 
                 // Get action display name
@@ -392,10 +437,6 @@
                         <div class="detail-row">
                             <span class="detail-label">Date:</span>
                             <span class="detail-value">${formattedDate}</span>
-                        </div>
-                        <div class="detail-row">
-                            <span class="detail-label">Time:</span>
-                            <span class="detail-value">${formattedTime}</span>
                         </div>
                         <div class="detail-row">
                             <span class="detail-label">User:</span>
@@ -527,6 +568,69 @@
                 closeDetails();
             }
         });
+    </script>
+    <script>
+        // Date range validation: ensure Date To is not before Date From
+        (function() {
+            const form = document.getElementById('filterForm');
+            const dateFrom = document.getElementById('dateFrom');
+            const dateTo = document.getElementById('dateTo');
+            const dateError = document.getElementById('dateError');
+
+            function clearError() {
+                dateError.style.display = 'none';
+                dateError.textContent = '';
+            }
+
+            function showError(msg) {
+                dateError.style.display = 'block';
+                dateError.textContent = msg;
+            }
+
+            function isValidRange() {
+                if (!dateFrom || !dateTo) return true;
+                if (!dateFrom.value || !dateTo.value) return true; // nothing to validate
+                const from = new Date(dateFrom.value);
+                const to = new Date(dateTo.value);
+                return to >= from;
+            }
+
+            // Update min on dateTo when dateFrom changes
+            if (dateFrom && dateTo) {
+                dateFrom.addEventListener('change', function() {
+                    if (dateFrom.value) {
+                        dateTo.min = dateFrom.value;
+                        // if current to < from, clear it so user must re-enter or click filter
+                        if (dateTo.value && new Date(dateTo.value) < new Date(dateFrom.value)) {
+                            dateTo.value = '';
+                        }
+                    } else {
+                        dateTo.removeAttribute('min');
+                    }
+                    clearError();
+                });
+
+                dateTo.addEventListener('change', function() {
+                    clearError();
+                    if (!isValidRange()) {
+                        showError('"Date To" must be the same as or after "Date From".');
+                    }
+                });
+            }
+
+            // Validate on submit
+            if (form) {
+                form.addEventListener('submit', function(e) {
+                    clearError();
+                    if (!isValidRange()) {
+                        e.preventDefault();
+                        showError('Please ensure "Date To" is the same as or after "Date From" before filtering.');
+                        // focus the Date To field for quick correction
+                        if (dateTo) dateTo.focus();
+                    }
+                });
+            }
+        })();
     </script>
 </body>
 </html>

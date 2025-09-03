@@ -2,7 +2,14 @@
 <html>
 <head>
   <title>Admin Dashboard</title>
+  
+  <!-- Favicon -->
+  <link rel="icon" type="image/jpeg" href="/logo.jpg">
+  <link rel="shortcut icon" type="image/jpeg" href="/logo.jpg">
+  <link rel="apple-touch-icon" href="/logo.jpg">
+  
   <link rel="stylesheet" href="/stylesheets/styles.css">
+  <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
   <style>
     .dashboard-header {
       display: flex;
@@ -50,9 +57,9 @@
   <!-- Search + Upload Employees + Add Employee Button -->
   <form class="search-bar" method="GET" action="/dashboard/admin/view-employees" style="margin-bottom: 15px; display: flex; gap: 10px; align-items: center;">
     <input type="text" id="liveSearchInput" placeholder="🔍Search employees..." style="width: 220px; min-width: 0;" />
-  <a href="/upload-employees" style="background: #3498db; color: white; padding: 9px 18px; border-radius: 6px; text-decoration: none; font-size: 15px; margin-left: 10px; margin-top: -20px; position: relative; display: inline-block;">📤 Upload Employees</a>
+    <a href="/upload-employees" style="background: #3498db; color: white; padding: 9px 18px; border-radius: 6px; text-decoration: none; font-size: 15px; margin-left: 10px; margin-top: -20px; position: relative; display: inline-block;">📤 Upload Employees</a>
     <a href="/employees/add" style="background: #3498db; color: white; padding: 9px 18px; border-radius: 6px; text-decoration: none; font-size: 15px; margin-left: 5px; margin-top: -20px; position: relative; display: inline-block;">➕ Add Employee</a>
-
+  <button type="button" id="exportExcelBtn" style="background: #3498db; color: white; padding: 12px 18px; border-radius: 6px; text-decoration: none; font-size: 15px;  margin-left: 5px; margin-top: -20px; position: relative; display: inline-block; border: none; cursor: pointer;">📥 Excel</button>
     <button id="bulkDeleteBtn" style="background: #3498db; color: white; padding: 10px 15px; border: none; border-radius: 8px; cursor: pointer; display: none; margin-left: 10px; margin-top: -20px; position: relative;">🗑 Delete Selected</button>
   </form>
 
@@ -89,7 +96,7 @@
               <form action="/employees/<%= employee.empCode %>/edit" method="get" style="display:inline;">
                 <button type="submit" style="background: #3498db; color: #222; border: none; border-radius: 5px; padding: 5px 12px; cursor: pointer; font-size: 14px;">✏ Edit</button>
               </form> |
-                <a href="#" onclick="deleteEmployee('<%= employee.empCode %>')" style="color: red; font-size: 22px; vertical-align: middle; text-decoration: none;">🗑️</a>
+                <a href="#" onclick="deleteEmployee('<%= employee.empCode %>')" style="color: red; font-size: 22px; vertical-align: middle; text-decoration: none;">🗑</a>
             </td>
           </tr>
         <% }) %>
@@ -128,15 +135,17 @@
           <td>${emp.homePractice}</td>
           <td>${emp.practiceManager}</td>
           <td class="actions">
-            <a href="/employees/${emp.empCode}/edit">✏ Edit</a> |
-            <a href="#" onclick="deleteEmployee('${emp.empCode}')" style="color: red;">🗑 Delete</a>
+            <form action="/employees/${emp.empCode}/edit" method="get" style="display:inline;">
+              <button type="submit" style="background: #3498db; color: #222; border: none; border-radius: 5px; padding: 5px 12px; cursor: pointer; font-size: 14px;">✏ Edit</button>
+            </form> |
+            <button type="button" class="delete-btn" data-emp-code="${emp.empCode}" style="background: none; border: none; color: #e74c3c; font-size: 22px; vertical-align: middle; cursor: pointer;">🗑️</button>
           </td>
         </tr>`;
     });
-    
     // Re-initialize checkbox handlers after search
     updateCheckboxHandlers();
     updateBulkDeleteButton();
+    attachDeleteHandlers();
   });
 
   function deleteEmployee(empCode) {
@@ -157,6 +166,20 @@
       });
     }
   }
+
+  // Attach delete handler to all delete buttons
+  function attachDeleteHandlers() {
+    const deleteBtns = document.querySelectorAll('.delete-btn');
+    deleteBtns.forEach(btn => {
+      btn.onclick = function() {
+        const empCode = this.getAttribute('data-emp-code');
+        deleteEmployee(empCode);
+      };
+    });
+  }
+
+  // Attach handlers on page load
+  attachDeleteHandlers();
 
   // Bulk delete functionality
   function updateCheckboxHandlers() {
@@ -244,6 +267,29 @@
     updateCheckboxHandlers();
     updateBulkDeleteButton();
   });
+
+  // Export to Excel functionality
+  document.getElementById('exportExcelBtn').onclick = function() {
+    function tableToExcel(table, filename = '') {
+      let downloadLink;
+      let dataType = 'application/vnd.ms-excel';
+      let tableHTML = table.outerHTML.replace(/ /g, '%20');
+      filename = filename ? filename + '.xls' : 'export.xls';
+      downloadLink = document.createElement('a');
+      document.body.appendChild(downloadLink);
+      if (navigator.msSaveOrOpenBlob) {
+        let blob = new Blob(['\ufeff', tableHTML], { type: dataType });
+        navigator.msSaveOrOpenBlob(blob, filename);
+      } else {
+        downloadLink.href = 'data:' + dataType + ', ' + tableHTML;
+        downloadLink.download = filename;
+        downloadLink.click();
+      }
+      document.body.removeChild(downloadLink);
+    }
+    const table = document.querySelector('.table-container table');
+    tableToExcel(table, 'Employees');
+  };
 </script>
 
 </body>
