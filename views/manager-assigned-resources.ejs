@@ -351,9 +351,12 @@ schedules.forEach(s => {
 
         $('#assignedSchedulesTable').DataTable({
             scrollX: false,
+            // Removed the length (entries-per-page) control. Show search box on the left instead.
+            // lengthMenu left in config for future reuse but it will not be shown because 'l' is removed from DOM.
             lengthMenu: [[25, 50, 100, -1], [25, 50, 100, 'All']],
             pageLength: -1,
-            dom: "<'row mb-2 mt-3'<'col-md-6 d-flex align-items-center'l><'col-md-6 d-flex justify-content-end'f>>" +
+            // Place the search ('f') control on the left where the length selector used to be.
+            dom: "<'row mb-2 mt-3'<'col-md-6 d-flex align-items-center'f><'col-md-6 d-flex justify-content-end'>>" +
                  "<'row'<'col-12'tr>>" +
                  "<'row mt-2'<'col-md-5'i><'col-md-7'p>>"
         });

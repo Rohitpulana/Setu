@@ -5097,7 +5097,7 @@ app.get('/api/projects/list', isAuth, async (req, res) => {
 });
 
 // Project Allocation Report - Main Route
-app.get('/project-allocation-report', isAuth, csrfProtection, async (req, res) => {
+app.get('/project-allocation-report', isAuth, isAdmin, csrfProtection, async (req, res) => {
   try {
     const { projectId, startDate, endDate, division, cbslClient } = req.query;
     
@@ -5176,7 +5176,7 @@ app.get('/project-allocation-report', isAuth, csrfProtection, async (req, res) =
 });
 
 // Excel Export Route
-app.get('/project-allocation-report/export/excel', isAuth, async (req, res) => {
+app.get('/project-allocation-report/export/excel', isAuth, isAdmin, async (req, res) => {
   try {
     const { projectId, startDate, endDate, division, cbslClient } = req.query;
     
@@ -5277,7 +5277,7 @@ app.get('/project-allocation-report/export/excel', isAuth, async (req, res) => {
 });
 
 // PDF Export Route  
-app.get('/project-allocation-report/export/pdf', isAuth, async (req, res) => {
+app.get('/project-allocation-report/export/pdf', isAuth, isAdmin, async (req, res) => {
   try {
     const { projectId, startDate, endDate, division, cbslClient } = req.query;
     
@@ -5518,71 +5518,140 @@ function isValidDate(date) {
 function generatePDFContent(project, reportData, startDate, endDate) {
   const startStr = startDate.toLocaleDateString();
   const endStr = endDate.toLocaleDateString();
-  
-  let html = `
-    <!DOCTYPE html>
-    <html>
-    <head>
-      <title>Project Allocation Report</title>
-      <style>
-        body { font-family: Arial, sans-serif; margin: 20px; }
-        h1 { color: #2c3e50; text-align: center; }
-        .header-info { text-align: center; margin-bottom: 30px; }
-        table { width: 100%; border-collapse: collapse; margin: 20px 0; }
-        th, td { border: 1px solid #ddd; padding: 8px; text-align: center; }
-        th { background-color: #f2f2f2; font-weight: bold; }
-        .practice-name { text-align: left; font-weight: bold; }
-        .total-row { background-color: #e8f4f8; font-weight: bold; }
-        .generated-info { text-align: center; margin-top: 30px; color: #666; font-size: 12px; }
-      </style>
-    </head>
-    <body>
-      <h1>Project Allocation Report</h1>
-      <div class="header-info">
-        <p><strong>Project:</strong> ${project.projectName}</p>
-        <p><strong>Period:</strong> ${startStr} to ${endStr}</p>
+  // Provide a path/url for the logo. In production PDF generation (puppeteer) this will resolve
+  const logoUrl = '/logo.jpg';
+
+  const months = reportData.months || [];
+  const practices = reportData.practices || [];
+
+  // Build rows for practices
+  const practiceRows = practices.map(practice => {
+    const monthCells = months.map(month => {
+      const allocation = reportData.matrix[practice.name] && reportData.matrix[practice.name][month];
+      const fte = allocation && (typeof allocation.fte !== 'undefined')
+        ? allocation.fte
+        : (reportData.monthWorkingHours && reportData.monthWorkingHours[month]
+            ? Number(((allocation ? allocation.totalHours : 0) / reportData.monthWorkingHours[month]).toFixed(2))
+            : 0);
+      return `<td class="num">${fte}</td>`;
+    }).join('');
+
+    return `<tr>
+      <td class="practice-name">${escapeHtml(practice.name)}</td>
+      ${monthCells}
+      <td class="total"><strong>${practice.totalFTE || 0}</strong></td>
+    </tr>`;
+  }).join('');
+
+  const totalRow = months.map(month => {
+    const fte = reportData.monthFTEs && typeof reportData.monthFTEs[month] !== 'undefined'
+      ? reportData.monthFTEs[month]
+      : (reportData.monthWorkingHours && reportData.monthWorkingHours[month]
+          ? Number(((reportData.monthTotals[month] || 0) / reportData.monthWorkingHours[month]).toFixed(2))
+          : 0);
+    return `<td class="num total-month">${fte}</td>`;
+  }).join('');
+
+  const generatedOn = new Date().toLocaleDateString();
+
+  const html = `<!doctype html>
+  <html>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Project Allocation Report</title>
+    <style>
+      /* Typography */
+      @media print { body { -webkit-print-color-adjust: exact; } }
+      :root { --accent: #0b6efd; --muted: #6b7280; --bg: #ffffff; }
+      body { font-family: 'Helvetica Neue', Arial, sans-serif; margin: 0; background: var(--bg); color: #111827; }
+      .container { max-width: 1100px; margin: 24px auto; padding: 20px 28px; }
+
+      /* Header */
+      .header { display: flex; align-items: center; gap: 16px; border-bottom: 1px solid #e6edf3; padding-bottom: 12px; }
+      .logo { width: 84px; height: 84px; object-fit: contain; border-radius: 6px; background: #fff; padding: 6px; box-shadow: 0 1px 3px rgba(12,17,28,0.06); }
+      .header-text { flex: 1; }
+      .title { font-size: 20px; font-weight: 700; color: #0f172a; margin: 0 0 6px 0; }
+      .meta { display: flex; gap: 12px; align-items: baseline; color: var(--muted); font-size: 13px; }
+      .meta .project { font-weight: 600; color: #0b6efd; }
+
+      /* Table */
+      .table-wrap { margin-top: 18px; overflow-x: auto; }
+      table { width: 100%; border-collapse: collapse; font-size: 13px; }
+      thead th { text-align: center; background: linear-gradient(180deg,#f8fafc,#f1f5f9); color: #0f172a; font-weight: 700; padding: 10px 8px; border: 1px solid #e6edf3; }
+      tbody td { padding: 10px 8px; border: 1px solid #e6edf3; }
+      tbody tr:nth-child(odd) td { background: #ffffff; }
+      tbody tr:nth-child(even) td { background: #fbfdff; }
+      td.practice-name { text-align: left; font-weight: 600; color: #0f172a; }
+      td.num, td.total, td.total-month { text-align: center; }
+      tr.total-row { background: #f1f9ff; font-weight: 700; }
+
+      /* Footer */
+      .footer { margin-top: 18px; display:flex; justify-content:space-between; color: var(--muted); font-size: 12px; }
+
+      /* Responsive small screens */
+      @media (max-width: 640px) {
+        .header { flex-direction: column; align-items: flex-start; gap: 8px; }
+        .logo { width: 64px; height: 64px; }
+        .meta { flex-direction: column; align-items: flex-start; gap: 4px; }
+        table { font-size: 12px; }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="container">
+      <div class="header">
+        <img src="${logoUrl}" alt="Logo" class="logo" />
+        <div class="header-text">
+          <h2 class="title">Project Allocation Report</h2>
+          <div class="meta">
+            <div><span class="muted"></span> <span class="project">${escapeHtml(project.projectName || 'All Projects')}</span></div>
+            <div><span class="muted">Period:</span> ${escapeHtml(startStr)} — ${escapeHtml(endStr)}</div>
+          </div>
+        </div>
       </div>
-      
-      <table>
-        <thead>
-          <tr>
-            <th>Practice</th>
-            ${reportData.months.map(month => `<th>${month} (FTE)</th>`).join('')}
-            <th>Total FTE</th>
-          </tr>
-        </thead>
-        <tbody>
-          ${reportData.practices.map(practice => `
+
+      <div class="table-wrap">
+        <table>
+          <thead>
             <tr>
-              <td class="practice-name">${practice.name}</td>
-              ${reportData.months.map(month => {
-                const allocation = reportData.matrix[practice.name] && reportData.matrix[practice.name][month];
-                const fte = allocation && (typeof allocation.fte !== 'undefined') ? allocation.fte : (reportData.monthWorkingHours && reportData.monthWorkingHours[month] ? Number(((allocation ? allocation.totalHours : 0) / reportData.monthWorkingHours[month]).toFixed(2)) : 0);
-                return `<td>${fte}</td>`;
-              }).join('')}
-              <td><strong>${practice.totalFTE || 0}</strong></td>
+              <th style="min-width:200px;">Practice</th>
+              ${months.map(m => `<th>${escapeHtml(m)}<br><span style="font-weight:600;color:var(--muted);font-size:11px">(FTE)</span></th>`).join('')}
+              <th>Total FTE</th>
             </tr>
-          `).join('')}
-          <tr class="total-row">
-            <td>Total</td>
-            ${reportData.months.map(month => {
-              const fte = reportData.monthFTEs && typeof reportData.monthFTEs[month] !== 'undefined' ? reportData.monthFTEs[month] : (reportData.monthWorkingHours && reportData.monthWorkingHours[month] ? Number(((reportData.monthTotals[month]||0)/reportData.monthWorkingHours[month]).toFixed(2)) : 0);
-              return `<td>${fte}</td>`;
-            }).join('')}
-            <td><strong>${reportData.grandTotalFTE || 0}</strong></td>
-          </tr>
-        </tbody>
-      </table>
-      
-      <div class="generated-info">
-        <p>Report generated on ${new Date().toLocaleString()}</p>
+          </thead>
+          <tbody>
+            ${practiceRows}
+            <tr class="total-row">
+              <td><strong>Total</strong></td>
+              ${totalRow}
+              <td><strong>${reportData.grandTotalFTE || 0}</strong></td>
+            </tr>
+          </tbody>
+        </table>
       </div>
-    </body>
-    </html>
-  `;
-  
+
+      <div class="footer">
+      
+        <div>Printed on ${escapeHtml(generatedOn)}</div>
+      </div>
+    </div>
+  </body>
+  </html>`;
+
   return html;
 }
+
+// Small helper to escape HTML inside template values
+function escapeHtml(str) {
+  if (str === null || typeof str === 'undefined') return '';
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+  }
 // Logout
 app.get('/logout', (req, res) => {
   req.session.destroy(() => {
@@ -5594,4 +5663,76 @@ app.get('/logout', (req, res) => {
 // Start server
 app.listen(port, () => {
   console.log(`🚀 Server running at http://localhost:${port}`);
+});
+
+// Manager Allocation Report - Restricted to manager role
+app.get('/manager-report', isAuth, async (req, res) => {
+  try {
+    // Only managers may view this route
+    if (req.session.user?.role !== 'manager') {
+      return res.status(403).send('Forbidden');
+    }
+
+    const { projectId, startDate, endDate, division, cbslClient } = req.query;
+
+    // Get all projects for dropdown
+    const projects = await ProjectMaster.find({}, 'projectName _id').sort({ projectName: 1 });
+
+    // Get distinct divisions (dihClient) and CBSL clients for dropdowns
+    const divisions = await ProjectMaster.distinct('dihClient').then(vals => vals.filter(v => v));
+    const cbslClients = await ProjectMaster.distinct('cbslClient').then(vals => vals.filter(v => v));
+
+    let reportData = null;
+    let selectedProject = null;
+
+    if (projectId) {
+      selectedProject = await ProjectMaster.findById(projectId);
+      const start = startDate ? new Date(startDate) : new Date(new Date().getFullYear(), 0, 1);
+      const end = endDate ? new Date(endDate) : new Date(new Date().getFullYear(), 11, 31);
+
+      const schedules = await AssignedSchedule.find({ project: projectId })
+        .populate('employee', 'empCode name homePractice')
+        .populate('project', 'projectName cbslClient dihClient')
+        .populate('practice', 'practiceName');
+
+      reportData = processAllocationData(schedules, start, end);
+    } else if (division || cbslClient) {
+      const projectFilter = {};
+      if (division) projectFilter.dihClient = division;
+      if (cbslClient) projectFilter.cbslClient = cbslClient;
+
+      const filteredProjects = await ProjectMaster.find(projectFilter, '_id');
+      const projectIds = filteredProjects.map(p => p._id);
+
+      if (projectIds.length > 0) {
+        const start = startDate ? new Date(startDate) : new Date(new Date().getFullYear(), 0, 1);
+        const end = endDate ? new Date(endDate) : new Date(new Date().getFullYear(), 11, 31);
+
+        const schedules = await AssignedSchedule.find({ project: { $in: projectIds } })
+          .populate('employee', 'empCode name homePractice')
+          .populate('project', 'projectName cbslClient dihClient')
+          .populate('practice', 'practiceName');
+
+        reportData = processAllocationData(schedules, start, end);
+      }
+    }
+
+    res.render('manager-report', {
+      title: 'Manager Allocation Report',
+      layout: 'sidebar-layout',
+      projects,
+      divisions,
+      cbslClients,
+      reportData,
+      selectedProject,
+      selectedProjectId: projectId || '',
+      selectedDivision: division || '',
+      selectedCbslClient: cbslClient || '',
+      startDate: req.query.startDate || '',
+      endDate: req.query.endDate || ''
+    });
+  } catch (error) {
+    console.error('Error in manager report:', error);
+    res.status(500).send('Error generating manager report');
+  }
 });
