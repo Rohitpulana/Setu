@@ -2215,7 +2215,8 @@ $(document).ready(function() {
       const start = new Date(startMonth + '-01');
       const end = new Date(endMonth + '-01');
 
-      if (end <= start) {
+      // Allow same month selection; only invalidate if end is before start
+      if (end < start) {
         return false;
       }
     }
@@ -2225,14 +2226,14 @@ $(document).ready(function() {
   // Real-time validation on date input changes
   $('#startMonth').on('change', function() {
     if (!validateDateRange()) {
-      alert('End month must be after start month');
+      alert('End month must be the same or after the start month');
       $(this).focus();
     }
   });
 
   $('#endMonth').on('change', function() {
     if (!validateDateRange()) {
-      alert('End month must be after start month');
+      alert('End month must be the same or after the start month');
       $(this).focus();
     }
   });
@@ -2241,7 +2242,7 @@ $(document).ready(function() {
   $('#dateRangeForm').on('submit', function(e) {
     if (!validateDateRange()) {
       e.preventDefault();
-      alert('End month must be after start month');
+      alert('End month must be the same or after the start month');
       return false;
     }
   });
