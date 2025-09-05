@@ -5652,21 +5652,8 @@ function escapeHtml(str) {
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&#39;');
   }
-// Logout
-app.get('/logout', (req, res) => {
-  req.session.destroy(() => {
-    res.redirect('/login');
-  });
-});
-  // end of the file 
-  
-// Start server
-app.listen(port, () => {
-  console.log(`🚀 Server running at http://localhost:${port}`);
-});
 
-// Manager Allocation Report - Restricted to manager role
-app.get('/manager-report', isAuth, async (req, res) => {
+  app.get('/manager-report', isAuth, async (req, res) => {
   try {
     // Only managers may view this route
     if (req.session.user?.role !== 'manager') {
@@ -5736,3 +5723,17 @@ app.get('/manager-report', isAuth, async (req, res) => {
     res.status(500).send('Error generating manager report');
   }
 });
+// Logout
+app.get('/logout', (req, res) => {
+  req.session.destroy(() => {
+    res.redirect('/login');
+  });
+});
+  // end of the file 
+  
+// Start server
+app.listen(port, () => {
+  console.log(`🚀 Server running at http://localhost:${port}`);
+});
+
+

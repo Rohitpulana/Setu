@@ -87,7 +87,7 @@
           </div>
 
           <div class="bg-white rounded-md p-3 shadow-sm">
-            <h3 class="text-sm font-medium mb-2">Division Utilization (by Project)</h3>
+            <h3 class="text-sm font-medium mb-2">Division Wise Utilization</h3>
             <div class="w-full h-56">
               <canvas id="divisionChart" data-labels='<%= JSON.stringify(divisionLabels || []) %>' data-values='<%= JSON.stringify(divisionData || []) %>' style="width:100%;height:100%;"></canvas>
             </div>
@@ -127,7 +127,7 @@
     // Color palette
     const PALETTE = ['#6366F1','#06B6D4','#8B5CF6','#10B981','#F59E0B','#F97316','#EF4444','#3B82F6','#E11D48','#84CC16'];
 
-    // Center text plugin: shows hovered segment percent or total
+    // Center text plugin: shows hovered segment percent or total (formats total as FTE when chart id === 'divisionChart')
     const centerTextPlugin = {
       id: 'centerText',
       afterDraw(chart) {
@@ -167,10 +167,19 @@
           // Default: show total sum of currently visible segments only
           const ds = data.datasets && data.datasets[0];
           const total = ds ? ds.data.reduce((s, v, i) => s + (isIndexVisible(chart, i) ? (Number(v) || 0) : 0), 0) : 0;
-          ctx.font = '600 14px "Inter"';
-          ctx.fillText(total, centerX, centerY - 6);
-          ctx.font = '400 11px "Inter"';
-          ctx.fillText('Total', centerX, centerY + 12);
+          // If this is the division chart, format as FTE with 2 decimals
+          const isDivision = chart && chart.canvas && chart.canvas.id === 'divisionChart';
+          if (isDivision) {
+            ctx.font = '600 14px "Inter"';
+            ctx.fillText(Number(total).toFixed(2), centerX, centerY - 8);
+            ctx.font = '400 11px "Inter"';
+            ctx.fillText('Total FTE', centerX, centerY + 12);
+          } else {
+            ctx.font = '600 14px "Inter"';
+            ctx.fillText(total, centerX, centerY - 6);
+            ctx.font = '400 11px "Inter"';
+            ctx.fillText('Total', centerX, centerY + 12);
+          }
         }
         ctx.restore();
       }
@@ -185,19 +194,41 @@
         animation: { duration: 600, easing: 'easeOutCubic' },
         plugins: {
           legend: { position: 'bottom', labels: {boxWidth:12, padding:12, usePointStyle: true} },
-          tooltip: { enabled: true, padding: 8, titleFont: {weight:600} }
+          tooltip: {
+            enabled: true,
+            padding: 8,
+            titleFont: {weight:600},
+            callbacks: {
+              // Show FTE (2 decimals) and original hours when available
+              label: function(context) {
+                const label = context.label || '';
+                const ds = context.dataset || {};
+                const value = context.raw; // this will be FTE for division chart if we pass FTEs
+                const idx = context.dataIndex;
+                let parts = [];
+                if (typeof value === 'number') parts.push(Number(value).toFixed(2) + ' FTE');
+                // show original hours if stored on dataset as _rawHours
+                if (ds._rawHours && typeof ds._rawHours[idx] !== 'undefined') {
+                  parts.push('(' + Number(ds._rawHours[idx]) + ' hrs)');
+                }
+                return label + ' — ' + parts.join(' ');
+              }
+            }
+          }
         }
       };
     }
 
     // Create a doughnut chart given canvas and data
-    function createDoughnut(el, labels, values, paletteOverride) {
+    function createDoughnut(el, labels, values, paletteOverride, rawHoursArray) {
       const ctx = el.getContext('2d');
       const palette = paletteOverride || PALETTE;
       const bg = labels.map((_,i)=> palette[i % palette.length]);
+      const dataset = { data: values, backgroundColor: bg, hoverOffset: 8 };
+      if (Array.isArray(rawHoursArray)) dataset._rawHours = rawHoursArray;
       return new Chart(ctx, {
         type: 'doughnut',
-        data: { labels: labels, datasets: [{ data: values, backgroundColor: bg, hoverOffset: 8 }] },
+        data: { labels: labels, datasets: [dataset] },
         options: baseOptions(),
         plugins: [centerTextPlugin]
       });
@@ -218,8 +249,42 @@
       const el = document.getElementById('divisionChart');
       if (!el) return;
       const labels = readDataset(el, 'labels', '[]');
-      const values = readDataset(el, 'values', '[]');
-      try { window.divisionChart = createDoughnut(el, labels, values); }
+      const values = readDataset(el, 'values', '[]'); // original hours per division
+
+      // determine selected month (from URL param or monthPicker input default)
+      const params = new URLSearchParams(window.location.search);
+      const urlMonth = params.get('month');
+      const inp = document.getElementById('monthPicker');
+      const now = new Date();
+      const pad = n => n < 10 ? '0'+n : ''+n;
+      const defaultMonth = now.getFullYear() + '-' + pad(now.getMonth()+1);
+      const selectedMonth = urlMonth || (inp && inp.value) || defaultMonth; // format YYYY-MM
+
+      // Calculate weekdays in the selected month (Mon-Fri)
+      function weekdaysInMonth(ym) {
+        if (!ym || typeof ym !== 'string') return 0;
+        const parts = ym.split('-');
+        if (parts.length < 2) return 0;
+        const year = parseInt(parts[0],10);
+        const month = parseInt(parts[1],10) - 1; // zero-based
+        const first = new Date(year, month, 1);
+        const last = new Date(year, month + 1, 0);
+        let count = 0;
+        for (let d = new Date(first); d <= last; d.setDate(d.getDate()+1)) {
+          const day = d.getDay();
+          if (day !== 0 && day !== 6) count++; // not Sunday(0) or Saturday(6)
+        }
+        return count;
+      }
+
+      const weekdays = weekdaysInMonth(selectedMonth) || 0;
+      const monthWorkingHours = weekdays * 8 || 1; // avoid divide by zero
+
+      // compute FTE values (hours / monthWorkingHours)
+      const hoursArr = values.map(v => Number(v) || 0);
+      const fteValues = hoursArr.map(h => Number(h) / monthWorkingHours);
+
+      try { window.divisionChart = createDoughnut(el, labels, fteValues, undefined, hoursArr); }
       catch(e){ console.warn('division chart error', e); }
     })();
 
